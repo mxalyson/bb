@@ -22,40 +22,153 @@ from core.utils import load_config, setup_logging
 from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
+from scipy import stats
 
 logger = None
 
 
 def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add MASTER TRADER advanced features - SAME as training!"""
-    
+    """Add MASTER TRADER advanced features - V1 (original)"""
+
     df_features = df.copy()
-    
+
     # Multi-period momentum
     for period in [3, 5, 8, 13, 21]:
         df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
         df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
-    
+
     # Trend strength
     if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
         df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
-    
+
     # Volatility regimes
     if 'atr' in df_features.columns:
         df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
-    
+
     # Price position in recent range
     df_features['price_position'] = (
-        (df_features['close'] - df_features['low'].rolling(20).min()) / 
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
         (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
     ).fillna(0.5)
-    
+
     # Volume momentum
     df_features['volume_momentum'] = df_features['volume'].pct_change(5)
-    
+
     # Acceleration
     df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
-    
+
+    return df_features
+
+
+def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add V2 ADVANCED features - MUST match train_master_scalper_v2.py exactly!
+
+    NEW FEATURES:
+    - Market microstructure
+    - Higher order moments (skewness, kurtosis)
+    - Regime detection
+    - Order flow proxies
+    - Multi-timeframe confluence
+    """
+
+    df_features = df.copy()
+
+    # === BASIC MOMENTUM (Multiple timeframes) ===
+    for period in [3, 5, 8, 13, 21, 34]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # === TREND STRENGTH ===
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+    df_features['trend_consistency'] = df_features['close'].rolling(20).apply(
+        lambda x: (x.iloc[-1] > x.iloc[0]) == (x.diff().mean() > 0)
+    )
+
+    # === VOLATILITY REGIME ===
+    df_features['volatility_regime'] = df_features['atr'] / df_features['atr'].rolling(50).mean()
+    df_features['volatility_change'] = df_features['atr'].pct_change(5)
+
+    # === PRICE POSITION IN RANGE ===
+    for period in [10, 20, 50]:
+        high_period = df_features['high'].rolling(period).max()
+        low_period = df_features['low'].rolling(period).min()
+        df_features[f'price_position_{period}'] = (
+            (df_features['close'] - low_period) / (high_period - low_period + 1e-8)
+        )
+
+    # === VOLUME ANALYSIS ===
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['volume_acceleration'] = df_features['volume'].diff(2) - df_features['volume'].diff(1)
+
+    # Price-volume correlation
+    df_features['price_volume_corr'] = df_features['close'].rolling(20).corr(df_features['volume'])
+
+    # === ACCELERATION & JERK ===
+    df_features['price_velocity'] = df_features['close'].diff(1)
+    df_features['price_acceleration'] = df_features['price_velocity'].diff(1)
+    df_features['price_jerk'] = df_features['price_acceleration'].diff(1)
+
+    # === HIGHER ORDER MOMENTS (Robustness) ===
+    for period in [10, 20, 50]:
+        returns = df_features['close'].pct_change()
+        df_features[f'returns_skew_{period}'] = returns.rolling(period).skew()
+        df_features[f'returns_kurt_{period}'] = returns.rolling(period).kurt()
+        df_features[f'returns_std_{period}'] = returns.rolling(period).std()
+
+    # === MARKET MICROSTRUCTURE ===
+    # Bid-ask spread proxy (high-low as % of close)
+    df_features['spread_proxy'] = (df_features['high'] - df_features['low']) / df_features['close'] * 100
+
+    # Price efficiency (how much price deviates from moving average)
+    for period in [10, 20]:
+        ma = df_features['close'].rolling(period).mean()
+        df_features[f'price_efficiency_{period}'] = (df_features['close'] - ma) / ma * 100
+
+    # === REGIME DETECTION ===
+    # Trending vs ranging market
+    df_features['adx_proxy'] = df_features['atr'] / df_features['close'] * 100
+
+    # Volume regime (high vs low volume periods)
+    median_volume = df_features['volume'].rolling(100).median()
+    df_features['volume_regime'] = (df_features['volume'] > median_volume).astype(int)
+
+    # === RELATIVE STRENGTH ===
+    for period in [5, 10, 20]:
+        gains = df_features['close'].diff().clip(lower=0)
+        losses = -df_features['close'].diff().clip(upper=0)
+
+        avg_gain = gains.rolling(period).mean()
+        avg_loss = losses.rolling(period).mean()
+
+        rs = avg_gain / (avg_loss + 1e-8)
+        df_features[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+
+    # === MOMENTUM OSCILLATORS ===
+    # Rate of change
+    for period in [5, 10, 20]:
+        df_features[f'roc_{period}'] = (
+            (df_features['close'] - df_features['close'].shift(period)) /
+            df_features['close'].shift(period) * 100
+        )
+
+    # === BOLLINGER BANDS FEATURES ===
+    for period in [20, 50]:
+        sma = df_features['close'].rolling(period).mean()
+        std = df_features['close'].rolling(period).std()
+
+        df_features[f'bb_position_{period}'] = (df_features['close'] - sma) / (2 * std + 1e-8)
+        df_features[f'bb_width_{period}'] = (4 * std) / sma * 100
+
+    # === CANDLE PATTERNS (Simple) ===
+    body = abs(df_features['close'] - df_features['open'])
+    upper_shadow = df_features['high'] - df_features[['close', 'open']].max(axis=1)
+    lower_shadow = df_features[['close', 'open']].min(axis=1) - df_features['low']
+
+    df_features['body_size'] = body / df_features['close'] * 100
+    df_features['upper_shadow_ratio'] = upper_shadow / (body + 1e-8)
+    df_features['lower_shadow_ratio'] = lower_shadow / (body + 1e-8)
+
     return df_features
 
 
@@ -65,36 +178,43 @@ class StrategyValidator:
     def __init__(self, config: dict, model_path: str):
         self.config = config
         self.model_path = Path(model_path)
-        
+
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
-        
+
         # Load model
         with open(self.model_path, 'rb') as f:
             self.model_data = pickle.load(f)
-        
+
         self.model = self.model_data['model']
         self.feature_names = self.model_data['feature_names']
-        
+
+        # Use optimal threshold if available (V2 models)
+        self.optimal_threshold = self.model_data.get('optimal_threshold', 0.5)
+
         self.initial_capital = config.get('initial_capital', 10000)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
     
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
-        
+
         # Get ML predictions
         X = df[self.feature_names].fillna(0)
+
+        # Replace inf values
+        X = X.replace([np.inf, -np.inf], 0)
+
         ml_probs = self.model.predict(X)
-        
+
         df['ml_prob_up'] = ml_probs
         df['ml_prob_down'] = 1 - ml_probs
-        df['ml_confidence'] = np.abs(ml_probs - 0.5) * 2
-        
-        # Generate signals with confidence filter
+        df['ml_confidence'] = np.abs(ml_probs - self.optimal_threshold) * 2
+
+        # Generate signals with confidence filter using optimal threshold
         df['signal'] = 0
-        mask_long = (df['ml_prob_up'] > 0.5) & (df['ml_confidence'] >= min_confidence)
-        mask_short = (df['ml_prob_down'] > 0.5) & (df['ml_confidence'] >= min_confidence)
-        
+        mask_long = (df['ml_prob_up'] > self.optimal_threshold) & (df['ml_confidence'] >= min_confidence)
+        mask_short = (df['ml_prob_down'] > (1 - self.optimal_threshold)) & (df['ml_confidence'] >= min_confidence)
+
         df.loc[mask_long, 'signal'] = 1
         df.loc[mask_short, 'signal'] = -1
         
@@ -342,23 +462,53 @@ def main():
     logger.info(f"✅ Downloaded {len(df):,} candles")
     logger.info("")
     
+    # Load model first to detect version
+    model_path = f"storage/models/{args.model}"
+
+    try:
+        with open(model_path, 'rb') as f:
+            model_data = pickle.load(f)
+        feature_names = model_data['feature_names']
+    except Exception as e:
+        logger.error(f"❌ Failed to load model: {e}")
+        return
+
+    # Detect model version by checking for V2-specific features
+    v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20', 'bb_width_50', 'price_position_10']
+    is_v2_model = any(f in feature_names for f in v2_features)
+
+    model_version = "V2" if is_v2_model else "V1"
+    logger.info(f"🔍 Detected model version: {model_version}")
+    logger.info(f"   Required features: {len(feature_names)}")
+    logger.info("")
+
     # Features
     logger.info("🔨 Building features...")
     fs = FeatureStore(config)
     df_features = fs.build_features(df, normalize=False)
-    df_features = create_advanced_features(df_features)
+
+    # Apply correct feature engineering based on model version
+    if is_v2_model:
+        logger.info("   Applying V2 advanced features...")
+        df_features = create_advanced_features_v2(df_features)
+    else:
+        logger.info("   Applying V1 advanced features...")
+        df_features = create_advanced_features(df_features)
+
     logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
     logger.info("")
-    
+
     # Validate strategy
-    model_path = f"storage/models/{args.model}"
-    
     try:
         validator = StrategyValidator(config, model_path)
+        logger.info(f"🎯 Using threshold: {validator.optimal_threshold:.3f}")
+        if validator.optimal_threshold != 0.5:
+            logger.info(f"   (Optimized threshold from V2 model)")
+        logger.info("")
     except Exception as e:
         logger.error(f"❌ Failed to load model: {e}")
         return
-    
+
     # Test different confidence levels
     confidence_levels = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
     
