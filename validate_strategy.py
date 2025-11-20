@@ -126,6 +126,10 @@ def load_model_universal(model_path: str) -> dict:
         if hasattr(data, 'model'):
             result['model'] = getattr(data, 'model')
             logger.info(f"   ✅ Found model in: data.model")
+        elif hasattr(data, 'models'):
+            # Ensemble model (multiple models)
+            result['model'] = getattr(data, 'models')
+            logger.info(f"   ✅ Found model in: data.models (ensemble)")
         elif hasattr(data, 'lgb_model'):
             result['model'] = getattr(data, 'lgb_model')
             logger.info(f"   ✅ Found model in: data.lgb_model")
@@ -133,9 +137,9 @@ def load_model_universal(model_path: str) -> dict:
             result['model'] = getattr(data, 'ml_model')
             logger.info(f"   ✅ Found model in: data.ml_model")
         else:
-            # Maybe the object itself IS the model
+            # Maybe the object itself IS the model wrapper
             result['model'] = data
-            logger.info(f"   ⚠️ Using data itself as model")
+            logger.info(f"   ⚠️ Using entire object as model wrapper")
 
         # Try multiple attribute names for feature_names
         possible_feature_attrs = [
@@ -214,6 +218,79 @@ def load_model_universal(model_path: str) -> dict:
     logger.info(f"   🎯 Threshold: {result['optimal_threshold']:.3f}")
 
     return result
+
+
+def create_classical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create classical technical analysis features.
+
+    Used by older models that expect standard TA indicators:
+    - returns, log_returns, volatility
+    - ATR (14, 20)
+    - SMA/EMA (7, 14, 21, 50, 100, 200)
+    - momentum, ROC, RSI, Stoch RSI
+    - volume indicators
+    - channel position
+    """
+    df_feat = df.copy()
+
+    # Returns
+    df_feat['returns'] = df_feat['close'].pct_change()
+    df_feat['log_returns'] = np.log(df_feat['close'] / df_feat['close'].shift(1))
+
+    # Volatility
+    df_feat['volatility'] = df_feat['returns'].rolling(20).std()
+    df_feat['volatility_30'] = df_feat['returns'].rolling(30).std()
+
+    # ATR
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = np.abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = np.abs(df_feat['low'] - df_feat['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    df_feat['atr_14'] = true_range.rolling(14).mean()
+    df_feat['atr_20'] = true_range.rolling(20).mean()
+
+    # SMA/EMA
+    for period in [7, 14, 21, 50, 100, 200]:
+        df_feat[f'sma_{period}'] = df_feat['close'].rolling(period).mean()
+        df_feat[f'ema_{period}'] = df_feat['close'].ewm(span=period, adjust=False).mean()
+
+    # Price vs MA
+    df_feat['price_vs_sma50'] = (df_feat['close'] - df_feat['sma_50']) / df_feat['sma_50'] * 100
+    df_feat['price_vs_sma200'] = (df_feat['close'] - df_feat['sma_200']) / df_feat['sma_200'] * 100
+
+    # Momentum
+    for period in [10, 20, 30]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    # ROC
+    df_feat['roc_30'] = ((df_feat['close'] - df_feat['close'].shift(30)) / df_feat['close'].shift(30)) * 100
+
+    # RSI
+    delta = df_feat['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10)
+    df_feat['rsi_14'] = 100 - (100 / (1 + rs))
+
+    # Stochastic RSI
+    rsi = df_feat['rsi_14']
+    rsi_low = rsi.rolling(14).min()
+    rsi_high = rsi.rolling(14).max()
+    df_feat['stoch_rsi'] = ((rsi - rsi_low) / (rsi_high - rsi_low + 1e-10)) * 100
+
+    # Volume
+    df_feat['volume_sma'] = df_feat['volume'].rolling(20).mean()
+    df_feat['volume_roc'] = df_feat['volume'].pct_change(10) * 100
+
+    # Channel
+    df_feat['high_20'] = df_feat['high'].rolling(20).max()
+    df_feat['low_20'] = df_feat['low'].rolling(20).min()
+    df_feat['channel_pos'] = ((df_feat['close'] - df_feat['low_20']) /
+                              (df_feat['high_20'] - df_feat['low_20'] + 1e-10)) * 100
+
+    return df_feat
 
 
 def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -390,7 +467,15 @@ class StrategyValidator:
         # Replace inf values
         X = X.replace([np.inf, -np.inf], 0)
 
-        ml_probs = self.model.predict(X)
+        # Try to predict - model could be a wrapper with custom predict
+        try:
+            ml_probs = self.model.predict(X)
+        except AttributeError:
+            # If model doesn't have predict, maybe it's an ensemble wrapper
+            if hasattr(self.model, '__call__'):
+                ml_probs = self.model(X)
+            else:
+                raise ValueError("Model has no predict() or __call__() method")
 
         df['ml_prob_up'] = ml_probs
         df['ml_prob_down'] = 1 - ml_probs
@@ -658,12 +743,25 @@ def main():
         logger.error(f"❌ Failed to load model: {e}")
         return
 
-    # Detect model version by checking for V2-specific features
+    # Detect model version by checking feature names
+    classical_features = ['returns', 'log_returns', 'atr_14', 'rsi_14', 'sma_7', 'ema_7', 'volatility']
     v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20', 'bb_width_50', 'price_position_10']
-    is_v2_model = any(f in feature_names for f in v2_features)
+    v1_features = ['momentum_3', 'momentum_5', 'volume_ratio_3', 'price_position']
 
-    model_version = "V2" if is_v2_model else "V1"
-    logger.info(f"📌 Detected model version: {model_version}")
+    has_classical = any(f in feature_names for f in classical_features)
+    has_v2 = any(f in feature_names for f in v2_features)
+    has_v1 = any(f in feature_names for f in v1_features)
+
+    if has_classical:
+        model_version = "Classical"
+    elif has_v2:
+        model_version = "V2"
+    elif has_v1:
+        model_version = "V1"
+    else:
+        model_version = "Unknown"
+
+    logger.info(f"📌 Detected model type: {model_version}")
     logger.info(f"   Required features: {len(feature_names)}")
     logger.info("")
 
@@ -673,12 +771,20 @@ def main():
     df_features = fs.build_features(df, normalize=False)
 
     # Apply correct feature engineering based on model version
-    if is_v2_model:
+    if model_version == "Classical":
+        logger.info("   Applying Classical TA features...")
+        df_features = create_classical_features(df_features)
+    elif model_version == "V2":
         logger.info("   Applying V2 advanced features...")
         df_features = create_advanced_features_v2(df_features)
-    else:
+    elif model_version == "V1":
         logger.info("   Applying V1 advanced features...")
         df_features = create_advanced_features(df_features)
+    else:
+        logger.warning(f"   ⚠️ Unknown model type - trying all features...")
+        df_features = create_classical_features(df_features)
+        df_features = create_advanced_features(df_features)
+        df_features = create_advanced_features_v2(df_features)
 
     logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
     logger.info("")
