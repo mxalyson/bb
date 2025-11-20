@@ -106,12 +106,36 @@ def load_model_universal(model_path: str) -> dict:
         logger.info(f"   📦 Dict format - keys: {list(data.keys())}")
 
     # Case 2: ModelWrapper or custom object
-    elif hasattr(data, 'model'):
-        result['model'] = getattr(data, 'model')
-        result['feature_names'] = getattr(data, 'feature_names', None) or getattr(data, 'features', None)
+    elif hasattr(data, 'model') or hasattr(data, '__dict__'):
+        # Extract model
+        if hasattr(data, 'model'):
+            result['model'] = getattr(data, 'model')
+        else:
+            result['model'] = data
+
+        # Try multiple attribute names for feature_names
+        possible_feature_attrs = [
+            'feature_names', 'features', 'feature_cols',
+            'feature_list', 'columns', 'feature_names_',
+            'input_features', 'selected_features'
+        ]
+
+        for attr_name in possible_feature_attrs:
+            if hasattr(data, attr_name):
+                result['feature_names'] = getattr(data, attr_name)
+                if result['feature_names'] is not None:
+                    logger.info(f"   ✅ Found feature_names in: {attr_name}")
+                    break
+
         result['optimal_threshold'] = getattr(data, 'optimal_threshold', 0.5)
 
+        # Log object structure for debugging
         logger.info(f"   📦 Object format - type: {type(data).__name__}")
+        if hasattr(data, '__dict__'):
+            attrs = [k for k in data.__dict__.keys() if not k.startswith('_')]
+            logger.info(f"   📋 Available attributes: {', '.join(attrs[:10])}")
+            if len(attrs) > 10:
+                logger.info(f"      ... and {len(attrs) - 10} more")
 
     # Case 3: Direct model (no wrapper)
     else:
@@ -125,15 +149,54 @@ def load_model_universal(model_path: str) -> dict:
 
     # Try to detect feature_names from model if not found
     if result['feature_names'] is None:
-        if hasattr(result['model'], 'feature_name_'):
-            result['feature_names'] = result['model'].feature_name_()
-            logger.info(f"   ✅ Extracted feature_names from model.feature_name_()")
-        elif hasattr(result['model'], 'feature_names_in_'):
-            result['feature_names'] = list(result['model'].feature_names_in_)
-            logger.info(f"   ✅ Extracted feature_names from model.feature_names_in_")
+        logger.info("   🔍 Trying to extract feature_names from model object...")
 
+        # Try LightGBM methods
+        if hasattr(result['model'], 'feature_name_'):
+            try:
+                result['feature_names'] = result['model'].feature_name_()
+                logger.info(f"   ✅ Extracted feature_names from model.feature_name_()")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+        # Try sklearn methods
+        elif hasattr(result['model'], 'feature_names_in_'):
+            try:
+                result['feature_names'] = list(result['model'].feature_names_in_)
+                logger.info(f"   ✅ Extracted feature_names from model.feature_names_in_")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+        # Try other common attributes
+        elif hasattr(result['model'], 'feature_name'):
+            try:
+                result['feature_names'] = result['model'].feature_name
+                logger.info(f"   ✅ Extracted feature_names from model.feature_name")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+    # Last resort: check if model has __dict__ and show what's inside
     if result['feature_names'] is None:
-        raise ValueError("Could not find feature_names in model - please check model format")
+        logger.warning("   ⚠️ Could not auto-detect feature_names")
+
+        # Show what's in the model
+        if hasattr(result['model'], '__dict__'):
+            model_attrs = [k for k in result['model'].__dict__.keys() if not k.startswith('_')]
+            if model_attrs:
+                logger.info(f"   📋 Model attributes: {', '.join(model_attrs[:10])}")
+
+        # Show what's in raw_data if it's an object
+        if hasattr(result['raw_data'], '__dict__'):
+            data_attrs = [k for k in result['raw_data'].__dict__.keys() if not k.startswith('_')]
+            if data_attrs:
+                logger.info(f"   📋 Raw data has these attributes: {', '.join(data_attrs)}")
+                logger.info("")
+                logger.info("   💡 TIP: Try one of these names for feature_names!")
+
+        raise ValueError(
+            "Could not find feature_names in model.\n"
+            "Please check the attribute names above and update the model or code."
+        )
 
     logger.info(f"   ✅ Model loaded successfully")
     logger.info(f"   📊 Features: {len(result['feature_names'])}")
