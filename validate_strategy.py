@@ -260,12 +260,14 @@ def create_classical_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['price_vs_sma50'] = (df_feat['close'] - df_feat['sma_50']) / df_feat['sma_50'] * 100
     df_feat['price_vs_sma200'] = (df_feat['close'] - df_feat['sma_200']) / df_feat['sma_200'] * 100
 
-    # Momentum
-    for period in [10, 20, 30]:
+    # Momentum (wider range)
+    for period in [5, 10, 20, 30]:
         df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
 
-    # ROC
-    df_feat['roc_30'] = ((df_feat['close'] - df_feat['close'].shift(30)) / df_feat['close'].shift(30)) * 100
+    # ROC (multiple periods)
+    for period in [5, 10, 20, 30]:
+        df_feat[f'roc_{period}'] = ((df_feat['close'] - df_feat['close'].shift(period)) /
+                                     (df_feat['close'].shift(period) + 1e-10)) * 100
 
     # RSI
     delta = df_feat['close'].diff()
