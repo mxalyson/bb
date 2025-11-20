@@ -96,52 +96,63 @@ def load_model_universal(model_path: str) -> dict:
         'raw_data': data
     }
 
+    # First, log what we're dealing with
+    data_type = type(data).__name__
+    logger.info(f"   📦 Type: {data_type}")
+
+    # Try to get all attributes available
+    attrs = []
+    if hasattr(data, '__dict__'):
+        try:
+            attrs = [k for k in data.__dict__.keys() if not k.startswith('_')]
+            logger.info(f"   📋 Object attributes: {', '.join(attrs[:15])}")
+            if len(attrs) > 15:
+                logger.info(f"      ... and {len(attrs) - 15} more")
+        except:
+            pass
+
     # Case 1: Standard dict format
     if isinstance(data, dict):
         result['model'] = data.get('model')
         result['feature_names'] = data.get('feature_names') or data.get('features')
         result['optimal_threshold'] = data.get('optimal_threshold', 0.5)
+        logger.info(f"   📦 Format: Dict with keys: {list(data.keys())}")
 
-        # Log all keys for debugging
-        logger.info(f"   📦 Dict format - keys: {list(data.keys())}")
+    # Case 2: Object with attributes (ModelWrapper, custom objects, etc.)
+    else:
+        logger.info(f"   📦 Format: Object")
 
-    # Case 2: ModelWrapper or custom object
-    elif hasattr(data, 'model') or hasattr(data, '__dict__'):
-        # Extract model
+        # Extract model - try multiple possible locations
         if hasattr(data, 'model'):
             result['model'] = getattr(data, 'model')
+            logger.info(f"   ✅ Found model in: data.model")
+        elif hasattr(data, 'lgb_model'):
+            result['model'] = getattr(data, 'lgb_model')
+            logger.info(f"   ✅ Found model in: data.lgb_model")
+        elif hasattr(data, 'ml_model'):
+            result['model'] = getattr(data, 'ml_model')
+            logger.info(f"   ✅ Found model in: data.ml_model")
         else:
+            # Maybe the object itself IS the model
             result['model'] = data
+            logger.info(f"   ⚠️ Using data itself as model")
 
         # Try multiple attribute names for feature_names
         possible_feature_attrs = [
-            'feature_names', 'features', 'feature_cols',
+            'feature_names', 'features', 'feature_cols', 'cols',
             'feature_list', 'columns', 'feature_names_',
-            'input_features', 'selected_features'
+            'input_features', 'selected_features', 'feature_columns'
         ]
 
         for attr_name in possible_feature_attrs:
             if hasattr(data, attr_name):
-                result['feature_names'] = getattr(data, attr_name)
-                if result['feature_names'] is not None:
-                    logger.info(f"   ✅ Found feature_names in: {attr_name}")
+                feat = getattr(data, attr_name)
+                if feat is not None and len(feat) > 0:
+                    result['feature_names'] = feat
+                    logger.info(f"   ✅ Found feature_names in: data.{attr_name} ({len(feat)} features)")
                     break
 
         result['optimal_threshold'] = getattr(data, 'optimal_threshold', 0.5)
-
-        # Log object structure for debugging
-        logger.info(f"   📦 Object format - type: {type(data).__name__}")
-        if hasattr(data, '__dict__'):
-            attrs = [k for k in data.__dict__.keys() if not k.startswith('_')]
-            logger.info(f"   📋 Available attributes: {', '.join(attrs[:10])}")
-            if len(attrs) > 10:
-                logger.info(f"      ... and {len(attrs) - 10} more")
-
-    # Case 3: Direct model (no wrapper)
-    else:
-        result['model'] = data
-        logger.info(f"   📦 Direct model - type: {type(data).__name__}")
-        logger.warning("   ⚠️ No feature_names found - model may fail!")
 
     # Validate we got the essentials
     if result['model'] is None:
