@@ -144,43 +144,101 @@ def download_bybit_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
     end_time = int(datetime.now().timestamp() * 1000)
     start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
+    logger.info(f"   Time range: {datetime.fromtimestamp(start_time/1000)} to {datetime.fromtimestamp(end_time/1000)}")
+
     # Bybit public API endpoint
     url = "https://api.bybit.com/v5/market/kline"
 
     all_data = []
-    current_end = end_time
+    current_start = start_time
+    requests_made = 0
+    max_requests = 20  # Limit to prevent infinite loops
 
-    while current_end > start_time:
+    while current_start < end_time and requests_made < max_requests:
         params = {
             'category': 'linear',
             'symbol': symbol,
             'interval': interval,
-            'end': current_end,
+            'start': current_start,
             'limit': 1000
         }
 
         try:
-            response = requests.get(url, params=params, timeout=10)
+            logger.info(f"   Request {requests_made + 1}: Fetching from {datetime.fromtimestamp(current_start/1000)}")
+            response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
+
             data = response.json()
 
-            if data['retCode'] != 0:
-                raise ValueError(f"API error: {data['retMsg']}")
+            # Debug: show API response structure
+            if requests_made == 0:
+                logger.info(f"   API response keys: {list(data.keys())}")
+                logger.info(f"   retCode: {data.get('retCode')}")
+                logger.info(f"   retMsg: {data.get('retMsg')}")
 
-            klines = data['result']['list']
-
-            if not klines:
+            if data.get('retCode') != 0:
+                error_msg = data.get('retMsg', 'Unknown error')
+                logger.error(f"❌ API error: {error_msg}")
+                logger.error(f"   Full response: {data}")
                 break
 
-            all_data.extend(klines)
-            current_end = int(klines[-1][0]) - 1
+            # Check if result exists
+            if 'result' not in data:
+                logger.error(f"❌ No 'result' in response: {data}")
+                break
 
+            result = data['result']
+
+            # Check if list exists
+            if 'list' not in result:
+                logger.error(f"❌ No 'list' in result: {result}")
+                break
+
+            klines = result['list']
+
+            if not klines:
+                logger.info(f"   No more data available")
+                break
+
+            logger.info(f"   ✓ Received {len(klines)} candles")
+            all_data.extend(klines)
+
+            # Update to next batch
+            # Bybit returns data sorted by timestamp DESC, so take the last one
+            last_timestamp = int(klines[-1][0])
+
+            # Move forward by 1ms to avoid duplicate
+            current_start = last_timestamp + 1
+
+            # If we got less than 1000, we've reached the end
+            if len(klines) < 1000:
+                logger.info(f"   Received less than 1000 candles, assuming end of data")
+                break
+
+            requests_made += 1
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error: {e}")
+            logger.error(f"   URL: {url}")
+            logger.error(f"   Params: {params}")
+            break
         except Exception as e:
-            logger.error(f"❌ Download error: {e}")
+            logger.error(f"❌ Unexpected error: {e}")
+            logger.error(f"   Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"   Traceback: {traceback.format_exc()}")
             break
 
     if not all_data:
-        raise ValueError("No data downloaded")
+        raise ValueError(
+            "No data downloaded. Possible issues:\n"
+            "  1. Network connectivity problem\n"
+            "  2. Bybit API is down or changed\n"
+            "  3. Symbol not found (check spelling: BTCUSDT)\n"
+            "  4. Interval not supported (use: 1, 3, 5, 15, 30, 60, 120, 240, D, W, M)"
+        )
+
+    logger.info(f"   Total data points: {len(all_data)}")
 
     # Convert to DataFrame
     df = pd.DataFrame(all_data, columns=[
@@ -200,6 +258,7 @@ def download_bybit_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
 
     logger.info(f"✅ Downloaded {len(df):,} candles")
     logger.info(f"   Period: {df.index[0]} to {df.index[-1]}")
+    logger.info("")
 
     return df
 
