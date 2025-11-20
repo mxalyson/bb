@@ -27,6 +27,121 @@ from scipy import stats
 logger = None
 
 
+# ============================================================================
+# UNIVERSAL MODEL LOADING - Works with ANY pickle model
+# ============================================================================
+
+class ModelWrapper:
+    """Generic wrapper for models saved with custom classes."""
+    def __init__(self, model=None, feature_names=None, **kwargs):
+        self.model = model
+        self.feature_names = feature_names
+        self.__dict__.update(kwargs)
+
+
+class UniversalUnpickler(pickle.Unpickler):
+    """Custom unpickler that can handle missing classes."""
+    def find_class(self, module, name):
+        # Handle missing ModelWrapper class
+        if name == 'ModelWrapper':
+            return ModelWrapper
+        # Try normal loading first
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            # If class not found, return a generic wrapper
+            return type(name, (), {})
+
+
+def load_model_universal(model_path: str) -> dict:
+    """
+    Universal model loader that works with any pickle format.
+
+    Supports:
+    - Standard dict format: {'model': ..., 'feature_names': ...}
+    - ModelWrapper format
+    - Direct model objects
+    - Any custom format
+
+    Returns standardized dict with:
+    - model: The actual ML model
+    - feature_names: List of feature names
+    - optimal_threshold: float (default 0.5)
+    """
+    logger.info(f"🔍 Loading model: {model_path}")
+
+    try:
+        # Method 1: Standard pickle load
+        with open(model_path, 'rb') as f:
+            data = pickle.load(f)
+
+        logger.info(f"   ✅ Loaded with standard pickle")
+
+    except Exception as e1:
+        logger.info(f"   ⚠️ Standard load failed: {str(e1)[:50]}")
+
+        # Method 2: Custom unpickler
+        try:
+            with open(model_path, 'rb') as f:
+                data = UniversalUnpickler(f).load()
+            logger.info(f"   ✅ Loaded with custom unpickler")
+        except Exception as e2:
+            raise ValueError(f"Failed to load model: {e2}")
+
+    # Now extract model information from whatever format we got
+    result = {
+        'model': None,
+        'feature_names': None,
+        'optimal_threshold': 0.5,
+        'raw_data': data
+    }
+
+    # Case 1: Standard dict format
+    if isinstance(data, dict):
+        result['model'] = data.get('model')
+        result['feature_names'] = data.get('feature_names') or data.get('features')
+        result['optimal_threshold'] = data.get('optimal_threshold', 0.5)
+
+        # Log all keys for debugging
+        logger.info(f"   📦 Dict format - keys: {list(data.keys())}")
+
+    # Case 2: ModelWrapper or custom object
+    elif hasattr(data, 'model'):
+        result['model'] = getattr(data, 'model')
+        result['feature_names'] = getattr(data, 'feature_names', None) or getattr(data, 'features', None)
+        result['optimal_threshold'] = getattr(data, 'optimal_threshold', 0.5)
+
+        logger.info(f"   📦 Object format - type: {type(data).__name__}")
+
+    # Case 3: Direct model (no wrapper)
+    else:
+        result['model'] = data
+        logger.info(f"   📦 Direct model - type: {type(data).__name__}")
+        logger.warning("   ⚠️ No feature_names found - model may fail!")
+
+    # Validate we got the essentials
+    if result['model'] is None:
+        raise ValueError("Could not extract model from pickle file")
+
+    # Try to detect feature_names from model if not found
+    if result['feature_names'] is None:
+        if hasattr(result['model'], 'feature_name_'):
+            result['feature_names'] = result['model'].feature_name_()
+            logger.info(f"   ✅ Extracted feature_names from model.feature_name_()")
+        elif hasattr(result['model'], 'feature_names_in_'):
+            result['feature_names'] = list(result['model'].feature_names_in_)
+            logger.info(f"   ✅ Extracted feature_names from model.feature_names_in_")
+
+    if result['feature_names'] is None:
+        raise ValueError("Could not find feature_names in model - please check model format")
+
+    logger.info(f"   ✅ Model loaded successfully")
+    logger.info(f"   📊 Features: {len(result['feature_names'])}")
+    logger.info(f"   🎯 Threshold: {result['optimal_threshold']:.3f}")
+
+    return result
+
+
 def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add MASTER TRADER advanced features - V1 (original)"""
 
@@ -182,15 +297,12 @@ class StrategyValidator:
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
 
-        # Load model
-        with open(self.model_path, 'rb') as f:
-            self.model_data = pickle.load(f)
+        # Load model using universal loader
+        self.model_data = load_model_universal(str(self.model_path))
 
         self.model = self.model_data['model']
         self.feature_names = self.model_data['feature_names']
-
-        # Use optimal threshold if available (V2 models)
-        self.optimal_threshold = self.model_data.get('optimal_threshold', 0.5)
+        self.optimal_threshold = self.model_data['optimal_threshold']
 
         self.initial_capital = config.get('initial_capital', 10000)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
@@ -466,8 +578,7 @@ def main():
     model_path = f"storage/models/{args.model}"
 
     try:
-        with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
+        model_data = load_model_universal(model_path)
         feature_names = model_data['feature_names']
     except Exception as e:
         logger.error(f"❌ Failed to load model: {e}")
@@ -478,7 +589,7 @@ def main():
     is_v2_model = any(f in feature_names for f in v2_features)
 
     model_version = "V2" if is_v2_model else "V1"
-    logger.info(f"🔍 Detected model version: {model_version}")
+    logger.info(f"📌 Detected model version: {model_version}")
     logger.info(f"   Required features: {len(feature_names)}")
     logger.info("")
 
