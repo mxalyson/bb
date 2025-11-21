@@ -1,0 +1,955 @@
+"""
+VALIDAÇÃO COMPLETA DA ESTRATÉGIA
+Testa a estratégia com diferentes parâmetros para validar robustez
+"""
+
+import sys
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning, message='.*Boolean Series key.*')
+sys.path.append(str(Path(__file__).parent))
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List
+import logging
+import argparse
+import pickle
+from datetime import datetime
+
+from core.utils import load_config, setup_logging
+from core.bybit_rest import BybitRESTClient
+from core.data import DataManager
+from core.features import FeatureStore
+from scipy import stats
+
+logger = None
+
+
+# ============================================================================
+# UNIVERSAL MODEL LOADING - Works with ANY pickle model
+# ============================================================================
+
+class ModelWrapper:
+    """Generic wrapper for models saved with custom classes."""
+    def __init__(self, model=None, feature_names=None, **kwargs):
+        self.model = model
+        self.feature_names = feature_names
+        self.__dict__.update(kwargs)
+
+
+class UniversalUnpickler(pickle.Unpickler):
+    """Custom unpickler that can handle missing classes."""
+    def find_class(self, module, name):
+        # Handle missing ModelWrapper class
+        if name == 'ModelWrapper':
+            return ModelWrapper
+        # Try normal loading first
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            # If class not found, return a generic wrapper
+            return type(name, (), {})
+
+
+def load_model_universal(model_path: str) -> dict:
+    """
+    Universal model loader that works with any pickle format.
+
+    Supports:
+    - Standard dict format: {'model': ..., 'feature_names': ...}
+    - ModelWrapper format
+    - Direct model objects
+    - Any custom format
+
+    Returns standardized dict with:
+    - model: The actual ML model
+    - feature_names: List of feature names
+    - optimal_threshold: float (default 0.5)
+    """
+    logger.info(f"🔍 Loading model: {model_path}")
+
+    try:
+        # Method 1: Standard pickle load
+        with open(model_path, 'rb') as f:
+            data = pickle.load(f)
+
+        logger.info(f"   ✅ Loaded with standard pickle")
+
+    except Exception as e1:
+        logger.info(f"   ⚠️ Standard load failed: {str(e1)[:50]}")
+
+        # Method 2: Custom unpickler
+        try:
+            with open(model_path, 'rb') as f:
+                data = UniversalUnpickler(f).load()
+            logger.info(f"   ✅ Loaded with custom unpickler")
+        except Exception as e2:
+            raise ValueError(f"Failed to load model: {e2}")
+
+    # Now extract model information from whatever format we got
+    result = {
+        'model': None,
+        'feature_names': None,
+        'optimal_threshold': 0.5,
+        'raw_data': data
+    }
+
+    # First, log what we're dealing with
+    data_type = type(data).__name__
+    logger.info(f"   📦 Type: {data_type}")
+
+    # Try to get all attributes available
+    attrs = []
+    if hasattr(data, '__dict__'):
+        try:
+            attrs = [k for k in data.__dict__.keys() if not k.startswith('_')]
+            logger.info(f"   📋 Object attributes: {', '.join(attrs[:15])}")
+            if len(attrs) > 15:
+                logger.info(f"      ... and {len(attrs) - 15} more")
+        except:
+            pass
+
+    # Case 1: Standard dict format
+    if isinstance(data, dict):
+        result['model'] = data.get('model')
+        result['feature_names'] = data.get('feature_names') or data.get('features')
+        result['optimal_threshold'] = data.get('optimal_threshold', 0.5)
+        logger.info(f"   📦 Format: Dict with keys: {list(data.keys())}")
+
+    # Case 2: Object with attributes (ModelWrapper, custom objects, etc.)
+    else:
+        logger.info(f"   📦 Format: Object")
+
+        # Extract model - try multiple possible locations
+        if hasattr(data, 'model'):
+            result['model'] = getattr(data, 'model')
+            logger.info(f"   ✅ Found model in: data.model")
+        elif hasattr(data, 'models'):
+            # Ensemble model (multiple models)
+            result['model'] = getattr(data, 'models')
+            logger.info(f"   ✅ Found model in: data.models (ensemble)")
+        elif hasattr(data, 'lgb_model'):
+            result['model'] = getattr(data, 'lgb_model')
+            logger.info(f"   ✅ Found model in: data.lgb_model")
+        elif hasattr(data, 'ml_model'):
+            result['model'] = getattr(data, 'ml_model')
+            logger.info(f"   ✅ Found model in: data.ml_model")
+        else:
+            # Maybe the object itself IS the model wrapper
+            result['model'] = data
+            logger.info(f"   ⚠️ Using entire object as model wrapper")
+
+        # Try multiple attribute names for feature_names
+        possible_feature_attrs = [
+            'feature_names', 'features', 'feature_cols', 'cols',
+            'feature_list', 'columns', 'feature_names_',
+            'input_features', 'selected_features', 'feature_columns'
+        ]
+
+        for attr_name in possible_feature_attrs:
+            if hasattr(data, attr_name):
+                feat = getattr(data, attr_name)
+                if feat is not None and len(feat) > 0:
+                    result['feature_names'] = feat
+                    logger.info(f"   ✅ Found feature_names in: data.{attr_name} ({len(feat)} features)")
+                    break
+
+        result['optimal_threshold'] = getattr(data, 'optimal_threshold', 0.5)
+
+    # Validate we got the essentials
+    if result['model'] is None:
+        raise ValueError("Could not extract model from pickle file")
+
+    # Try to detect feature_names from model if not found
+    if result['feature_names'] is None:
+        logger.info("   🔍 Trying to extract feature_names from model object...")
+
+        # Try LightGBM methods
+        if hasattr(result['model'], 'feature_name_'):
+            try:
+                result['feature_names'] = result['model'].feature_name_()
+                logger.info(f"   ✅ Extracted feature_names from model.feature_name_()")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+        # Try sklearn methods
+        elif hasattr(result['model'], 'feature_names_in_'):
+            try:
+                result['feature_names'] = list(result['model'].feature_names_in_)
+                logger.info(f"   ✅ Extracted feature_names from model.feature_names_in_")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+        # Try other common attributes
+        elif hasattr(result['model'], 'feature_name'):
+            try:
+                result['feature_names'] = result['model'].feature_name
+                logger.info(f"   ✅ Extracted feature_names from model.feature_name")
+            except Exception as e:
+                logger.info(f"      Failed: {str(e)[:50]}")
+
+    # Last resort: check if model has __dict__ and show what's inside
+    if result['feature_names'] is None:
+        logger.warning("   ⚠️ Could not auto-detect feature_names")
+
+        # Show what's in the model
+        if hasattr(result['model'], '__dict__'):
+            model_attrs = [k for k in result['model'].__dict__.keys() if not k.startswith('_')]
+            if model_attrs:
+                logger.info(f"   📋 Model attributes: {', '.join(model_attrs[:10])}")
+
+        # Show what's in raw_data if it's an object
+        if hasattr(result['raw_data'], '__dict__'):
+            data_attrs = [k for k in result['raw_data'].__dict__.keys() if not k.startswith('_')]
+            if data_attrs:
+                logger.info(f"   📋 Raw data has these attributes: {', '.join(data_attrs)}")
+                logger.info("")
+                logger.info("   💡 TIP: Try one of these names for feature_names!")
+
+        raise ValueError(
+            "Could not find feature_names in model.\n"
+            "Please check the attribute names above and update the model or code."
+        )
+
+    logger.info(f"   ✅ Model loaded successfully")
+    logger.info(f"   📊 Features: {len(result['feature_names'])}")
+    logger.info(f"   🎯 Threshold: {result['optimal_threshold']:.3f}")
+
+    return result
+
+
+def create_classical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create classical technical analysis features.
+
+    Used by older models that expect standard TA indicators:
+    - returns, log_returns, volatility
+    - ATR (14, 20)
+    - SMA/EMA (7, 14, 21, 50, 100, 200)
+    - momentum, ROC, RSI, Stoch RSI
+    - volume indicators
+    - channel position
+    """
+    df_feat = df.copy()
+
+    # Returns
+    df_feat['returns'] = df_feat['close'].pct_change()
+    df_feat['log_returns'] = np.log(df_feat['close'] / df_feat['close'].shift(1))
+
+    # Volatility
+    df_feat['volatility'] = df_feat['returns'].rolling(20).std()
+    df_feat['volatility_30'] = df_feat['returns'].rolling(30).std()
+
+    # ATR
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = np.abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = np.abs(df_feat['low'] - df_feat['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    df_feat['atr_14'] = true_range.rolling(14).mean()
+    df_feat['atr_20'] = true_range.rolling(20).mean()
+
+    # SMA/EMA
+    for period in [7, 14, 21, 50, 100, 200]:
+        df_feat[f'sma_{period}'] = df_feat['close'].rolling(period).mean()
+        df_feat[f'ema_{period}'] = df_feat['close'].ewm(span=period, adjust=False).mean()
+
+    # Price vs MA
+    df_feat['price_vs_sma50'] = (df_feat['close'] - df_feat['sma_50']) / df_feat['sma_50'] * 100
+    df_feat['price_vs_sma200'] = (df_feat['close'] - df_feat['sma_200']) / df_feat['sma_200'] * 100
+
+    # Momentum
+    for period in [10, 20, 30]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    # ROC
+    df_feat['roc_30'] = ((df_feat['close'] - df_feat['close'].shift(30)) / df_feat['close'].shift(30)) * 100
+
+    # RSI
+    delta = df_feat['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10)
+    df_feat['rsi_14'] = 100 - (100 / (1 + rs))
+
+    # Stochastic RSI
+    rsi = df_feat['rsi_14']
+    rsi_low = rsi.rolling(14).min()
+    rsi_high = rsi.rolling(14).max()
+    df_feat['stoch_rsi'] = ((rsi - rsi_low) / (rsi_high - rsi_low + 1e-10)) * 100
+
+    # Volume
+    df_feat['volume_sma'] = df_feat['volume'].rolling(20).mean()
+    df_feat['volume_roc'] = df_feat['volume'].pct_change(10) * 100
+
+    # Channel
+    df_feat['high_20'] = df_feat['high'].rolling(20).max()
+    df_feat['low_20'] = df_feat['low'].rolling(20).min()
+    df_feat['channel_pos'] = ((df_feat['close'] - df_feat['low_20']) /
+                              (df_feat['high_20'] - df_feat['low_20'] + 1e-10)) * 100
+
+    return df_feat
+
+
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add MASTER TRADER advanced features - V1 (original)"""
+
+    df_features = df.copy()
+
+    # Multi-period momentum
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # Trend strength
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regimes
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position in recent range
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    # Volume momentum
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+
+    # Acceleration
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    return df_features
+
+
+def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add V2 ADVANCED features - MUST match train_master_scalper_v2.py exactly!
+
+    NEW FEATURES:
+    - Market microstructure
+    - Higher order moments (skewness, kurtosis)
+    - Regime detection
+    - Order flow proxies
+    - Multi-timeframe confluence
+    """
+
+    df_features = df.copy()
+
+    # === BASIC MOMENTUM (Multiple timeframes) ===
+    for period in [3, 5, 8, 13, 21, 34]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # === TREND STRENGTH ===
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+    df_features['trend_consistency'] = df_features['close'].rolling(20).apply(
+        lambda x: (x.iloc[-1] > x.iloc[0]) == (x.diff().mean() > 0)
+    )
+
+    # === VOLATILITY REGIME ===
+    df_features['volatility_regime'] = df_features['atr'] / df_features['atr'].rolling(50).mean()
+    df_features['volatility_change'] = df_features['atr'].pct_change(5)
+
+    # === PRICE POSITION IN RANGE ===
+    for period in [10, 20, 50]:
+        high_period = df_features['high'].rolling(period).max()
+        low_period = df_features['low'].rolling(period).min()
+        df_features[f'price_position_{period}'] = (
+            (df_features['close'] - low_period) / (high_period - low_period + 1e-8)
+        )
+
+    # === VOLUME ANALYSIS ===
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['volume_acceleration'] = df_features['volume'].diff(2) - df_features['volume'].diff(1)
+
+    # Price-volume correlation
+    df_features['price_volume_corr'] = df_features['close'].rolling(20).corr(df_features['volume'])
+
+    # === ACCELERATION & JERK ===
+    df_features['price_velocity'] = df_features['close'].diff(1)
+    df_features['price_acceleration'] = df_features['price_velocity'].diff(1)
+    df_features['price_jerk'] = df_features['price_acceleration'].diff(1)
+
+    # === HIGHER ORDER MOMENTS (Robustness) ===
+    for period in [10, 20, 50]:
+        returns = df_features['close'].pct_change()
+        df_features[f'returns_skew_{period}'] = returns.rolling(period).skew()
+        df_features[f'returns_kurt_{period}'] = returns.rolling(period).kurt()
+        df_features[f'returns_std_{period}'] = returns.rolling(period).std()
+
+    # === MARKET MICROSTRUCTURE ===
+    # Bid-ask spread proxy (high-low as % of close)
+    df_features['spread_proxy'] = (df_features['high'] - df_features['low']) / df_features['close'] * 100
+
+    # Price efficiency (how much price deviates from moving average)
+    for period in [10, 20]:
+        ma = df_features['close'].rolling(period).mean()
+        df_features[f'price_efficiency_{period}'] = (df_features['close'] - ma) / ma * 100
+
+    # === REGIME DETECTION ===
+    # Trending vs ranging market
+    df_features['adx_proxy'] = df_features['atr'] / df_features['close'] * 100
+
+    # Volume regime (high vs low volume periods)
+    median_volume = df_features['volume'].rolling(100).median()
+    df_features['volume_regime'] = (df_features['volume'] > median_volume).astype(int)
+
+    # === RELATIVE STRENGTH ===
+    for period in [5, 10, 20]:
+        gains = df_features['close'].diff().clip(lower=0)
+        losses = -df_features['close'].diff().clip(upper=0)
+
+        avg_gain = gains.rolling(period).mean()
+        avg_loss = losses.rolling(period).mean()
+
+        rs = avg_gain / (avg_loss + 1e-8)
+        df_features[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+
+    # === MOMENTUM OSCILLATORS ===
+    # Rate of change
+    for period in [5, 10, 20]:
+        df_features[f'roc_{period}'] = (
+            (df_features['close'] - df_features['close'].shift(period)) /
+            df_features['close'].shift(period) * 100
+        )
+
+    # === BOLLINGER BANDS FEATURES ===
+    for period in [20, 50]:
+        sma = df_features['close'].rolling(period).mean()
+        std = df_features['close'].rolling(period).std()
+
+        df_features[f'bb_position_{period}'] = (df_features['close'] - sma) / (2 * std + 1e-8)
+        df_features[f'bb_width_{period}'] = (4 * std) / sma * 100
+
+    # === CANDLE PATTERNS (Simple) ===
+    body = abs(df_features['close'] - df_features['open'])
+    upper_shadow = df_features['high'] - df_features[['close', 'open']].max(axis=1)
+    lower_shadow = df_features[['close', 'open']].min(axis=1) - df_features['low']
+
+    df_features['body_size'] = body / df_features['close'] * 100
+    df_features['upper_shadow_ratio'] = upper_shadow / (body + 1e-8)
+    df_features['lower_shadow_ratio'] = lower_shadow / (body + 1e-8)
+
+    return df_features
+
+
+class StrategyValidator:
+    """Valida a estratégia com diferentes configurações."""
+    
+    def __init__(self, config: dict, model_path: str):
+        self.config = config
+        self.model_path = Path(model_path)
+
+        if not self.model_path.exists():
+            raise ValueError(f"Model not found: {model_path}")
+
+        # Load model using universal loader
+        self.model_data = load_model_universal(str(self.model_path))
+
+        self.model = self.model_data['model']
+        self.feature_names = self.model_data['feature_names']
+        self.optimal_threshold = self.model_data['optimal_threshold']
+
+        self.initial_capital = config.get('initial_capital', 10000)
+        self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
+    
+    def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
+        """Run backtest com filtro de confiança mínima."""
+
+        # Get ML predictions
+        X = df[self.feature_names].fillna(0)
+
+        # Replace inf values
+        X = X.replace([np.inf, -np.inf], 0)
+
+        # Try to predict - model could be a wrapper with custom predict
+        try:
+            ml_probs = self.model.predict(X)
+        except AttributeError:
+            # If model doesn't have predict, maybe it's an ensemble wrapper
+            if hasattr(self.model, '__call__'):
+                ml_probs = self.model(X)
+            else:
+                raise ValueError("Model has no predict() or __call__() method")
+
+        df['ml_prob_up'] = ml_probs
+        df['ml_prob_down'] = 1 - ml_probs
+        df['ml_confidence'] = np.abs(ml_probs - self.optimal_threshold) * 2
+
+        # Generate signals with confidence filter using optimal threshold
+        df['signal'] = 0
+        mask_long = (df['ml_prob_up'] > self.optimal_threshold) & (df['ml_confidence'] >= min_confidence)
+        mask_short = (df['ml_prob_down'] > (1 - self.optimal_threshold)) & (df['ml_confidence'] >= min_confidence)
+
+        df.loc[mask_long, 'signal'] = 1
+        df.loc[mask_short, 'signal'] = -1
+        
+        # Simulate
+        trades = self._simulate(df)
+        
+        # Stats
+        stats = self._calculate_stats(trades, df, min_confidence)
+        
+        return stats
+    
+    def _simulate(self, df: pd.DataFrame) -> List[Dict]:
+        trades = []
+        position = None
+        capital = self.initial_capital
+        cooldown = 0
+        
+        for i in range(len(df)):
+            current = df.iloc[i]
+            
+            if cooldown > 0:
+                cooldown -= 1
+            
+            # Check exit
+            if position:
+                exit_reason = self._check_exit(position, current, i)
+                if exit_reason:
+                    trade = self._close_trade(position, current, exit_reason)
+                    trades.append(trade)
+                    capital += trade['pnl_amount']
+                    position = None
+                    cooldown = 4
+            
+            # Check entry
+            if not position and current['signal'] != 0 and cooldown == 0 and i < len(df) - 20:
+                position = self._open_trade(current, capital, i)
+        
+        # Close final position
+        if position:
+            trade = self._close_trade(position, df.iloc[-1], 'end_of_data')
+            trades.append(trade)
+        
+        return trades
+    
+    def _open_trade(self, current, capital, idx):
+        direction = 'long' if current['signal'] == 1 else 'short'
+        price = current['close']
+        atr = current.get('atr', price * 0.01)
+        
+        if direction == 'long':
+            sl = price - (atr * 2.0)
+            tp1 = price + (atr * 1.0)
+            tp2 = price + (atr * 2.0)
+            tp3 = price + (atr * 3.0)
+        else:
+            sl = price + (atr * 2.0)
+            tp1 = price - (atr * 1.0)
+            tp2 = price - (atr * 2.0)
+            tp3 = price - (atr * 3.0)
+        
+        sl_dist = abs((sl - price) / price)
+        risk_amt = capital * self.risk_per_trade
+        size = risk_amt / sl_dist if sl_dist > 0 else capital * 0.1
+        size = min(size, capital * 0.95)
+        
+        return {
+            'entry_idx': idx,
+            'entry_time': current.name,
+            'entry_price': price,
+            'direction': direction,
+            'size': size,
+            'stop_loss': sl,
+            'tp1': tp1,
+            'tp2': tp2,
+            'tp3': tp3,
+            'ml_confidence': current['ml_confidence']
+        }
+    
+    def _check_exit(self, position, current, idx):
+        high = current['high']
+        low = current['low']
+        direction = position['direction']
+        
+        if direction == 'long':
+            if low <= position['stop_loss']:
+                return 'stop_loss'
+            if high >= position['tp3']:
+                return 'take_profit_3'
+            if high >= position['tp2']:
+                return 'take_profit_2'
+            if high >= position['tp1']:
+                return 'take_profit_1'
+        else:
+            if high >= position['stop_loss']:
+                return 'stop_loss'
+            if low <= position['tp3']:
+                return 'take_profit_3'
+            if low <= position['tp2']:
+                return 'take_profit_2'
+            if low <= position['tp1']:
+                return 'take_profit_1'
+        
+        # Time exit (48h)
+        if idx - position['entry_idx'] > 192:
+            return 'time_exit'
+        
+        return None
+    
+    def _close_trade(self, position, current, reason):
+        if reason == 'stop_loss':
+            exit_price = position['stop_loss']
+        elif reason == 'take_profit_1':
+            exit_price = position['tp1']
+        elif reason == 'take_profit_2':
+            exit_price = position['tp2']
+        elif reason == 'take_profit_3':
+            exit_price = position['tp3']
+        else:
+            exit_price = current['close']
+        
+        entry = position['entry_price']
+        direction = position['direction']
+        
+        if direction == 'long':
+            pnl_pct = ((exit_price - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - exit_price) / entry) * 100
+        
+        pnl_amount = position['size'] * (pnl_pct / 100)
+        
+        return {
+            'entry_time': position['entry_time'],
+            'exit_time': current.name,
+            'direction': direction,
+            'entry_price': entry,
+            'exit_price': exit_price,
+            'size': position['size'],
+            'pnl_pct': pnl_pct,
+            'pnl_amount': pnl_amount,
+            'reason': reason,
+            'ml_confidence': position['ml_confidence']
+        }
+    
+    def _calculate_stats(self, trades, df, min_confidence):
+        if not trades:
+            return {
+                'error': 'No trades',
+                'total_trades': 0,
+                'min_confidence': min_confidence
+            }
+        
+        df_trades = pd.DataFrame(trades)
+        
+        total = len(df_trades)
+        winning = df_trades[df_trades['pnl_amount'] > 0]
+        losing = df_trades[df_trades['pnl_amount'] <= 0]
+        
+        win_rate = len(winning) / total if total > 0 else 0
+        
+        total_pnl = df_trades['pnl_amount'].sum()
+        roi = (total_pnl / self.initial_capital) * 100
+        
+        avg_win = winning['pnl_amount'].mean() if len(winning) > 0 else 0
+        avg_loss = abs(losing['pnl_amount'].mean()) if len(losing) > 0 else 0
+        
+        pf = (winning['pnl_amount'].sum() / abs(losing['pnl_amount'].sum()) 
+              if len(losing) > 0 and losing['pnl_amount'].sum() != 0 else 0)
+        
+        returns = df_trades['pnl_pct'].values
+        sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(252) 
+                 if len(returns) > 1 and np.std(returns) > 0 else 0)
+        
+        equity = self.initial_capital + df_trades['pnl_amount'].cumsum()
+        peak = equity.expanding().max()
+        dd = ((equity - peak) / peak * 100).min()
+        
+        # Direction stats
+        longs = df_trades[df_trades['direction'] == 'long']
+        shorts = df_trades[df_trades['direction'] == 'short']
+        
+        long_wr = (len(longs[longs['pnl_amount'] > 0]) / len(longs) * 100) if len(longs) > 0 else 0
+        short_wr = (len(shorts[shorts['pnl_amount'] > 0]) / len(shorts) * 100) if len(shorts) > 0 else 0
+        
+        # Confidence stats
+        avg_confidence = df_trades['ml_confidence'].mean()
+        
+        return {
+            'min_confidence': min_confidence,
+            'total_trades': total,
+            'winning_trades': len(winning),
+            'losing_trades': len(losing),
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'roi': roi,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'profit_factor': pf,
+            'max_drawdown': dd,
+            'sharpe_ratio': sharpe,
+            'final_capital': self.initial_capital + total_pnl,
+            'avg_ml_confidence': avg_confidence,
+            'long_trades': len(longs),
+            'short_trades': len(shorts),
+            'long_wr': long_wr,
+            'short_wr': short_wr,
+        }
+
+
+def main():
+    global logger
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--symbol', type=str, default='BTCUSDT')
+    parser.add_argument('--days', type=int, default=180)
+    parser.add_argument('--model', type=str, default='ml_model_master_scalper_365d.pkl')
+    
+    args = parser.parse_args()
+    
+    config = load_config('standard')
+    logger = setup_logging('INFO', log_to_file=False)
+    
+    logger.info("=" * 80)
+    logger.info("🔬 VALIDAÇÃO COMPLETA DA ESTRATÉGIA")
+    logger.info("=" * 80)
+    logger.info(f"Symbol: {args.symbol}")
+    logger.info(f"Period: {args.days} days")
+    logger.info(f"Model: {args.model}")
+    logger.info("")
+    
+    # Download data
+    logger.info("📥 Downloading data...")
+    rest_client = BybitRESTClient(
+        api_key=config['bybit_api_key'],
+        api_secret=config['bybit_api_secret'],
+        testnet=config['bybit_testnet']
+    )
+    
+    dm = DataManager(rest_client)
+    df = dm.get_data(args.symbol, '15m', args.days, use_cache=False)
+    
+    if df.empty:
+        logger.error("❌ No data")
+        return
+    
+    logger.info(f"✅ Downloaded {len(df):,} candles")
+    logger.info("")
+    
+    # Load model first to detect version
+    model_path = f"storage/models/{args.model}"
+
+    try:
+        model_data = load_model_universal(model_path)
+        feature_names = model_data['feature_names']
+    except Exception as e:
+        logger.error(f"❌ Failed to load model: {e}")
+        return
+
+    # Detect model version by checking feature names
+    classical_features = ['returns', 'log_returns', 'atr_14', 'rsi_14', 'sma_7', 'ema_7', 'volatility']
+    v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20', 'bb_width_50', 'price_position_10']
+    v1_features = ['momentum_3', 'momentum_5', 'volume_ratio_3', 'price_position']
+
+    has_classical = any(f in feature_names for f in classical_features)
+    has_v2 = any(f in feature_names for f in v2_features)
+    has_v1 = any(f in feature_names for f in v1_features)
+
+    if has_classical:
+        model_version = "Classical"
+    elif has_v2:
+        model_version = "V2"
+    elif has_v1:
+        model_version = "V1"
+    else:
+        model_version = "Unknown"
+
+    logger.info(f"📌 Detected model type: {model_version}")
+    logger.info(f"   Required features: {len(feature_names)}")
+    logger.info("")
+
+    # Features
+    logger.info("🔨 Building features...")
+    fs = FeatureStore(config)
+    df_features = fs.build_features(df, normalize=False)
+
+    # Apply correct feature engineering based on model version
+    if model_version == "Classical":
+        logger.info("   Applying Classical TA features...")
+        df_features = create_classical_features(df_features)
+    elif model_version == "V2":
+        logger.info("   Applying V2 advanced features...")
+        df_features = create_advanced_features_v2(df_features)
+    elif model_version == "V1":
+        logger.info("   Applying V1 advanced features...")
+        df_features = create_advanced_features(df_features)
+    else:
+        logger.warning(f"   ⚠️ Unknown model type - trying all features...")
+        df_features = create_classical_features(df_features)
+        df_features = create_advanced_features(df_features)
+        df_features = create_advanced_features_v2(df_features)
+
+    logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
+    logger.info("")
+
+    # Validate strategy
+    try:
+        validator = StrategyValidator(config, model_path)
+        logger.info(f"🎯 Using threshold: {validator.optimal_threshold:.3f}")
+        if validator.optimal_threshold != 0.5:
+            logger.info(f"   (Optimized threshold from V2 model)")
+        logger.info("")
+    except Exception as e:
+        logger.error(f"❌ Failed to load model: {e}")
+        return
+
+    # Test different confidence levels
+    confidence_levels = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
+    
+    logger.info("=" * 80)
+    logger.info("🧪 TESTANDO DIFERENTES NÍVEIS DE CONFIANÇA")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    results = []
+    
+    for min_conf in confidence_levels:
+        logger.info(f"Testing min confidence: {min_conf:.0%}...")
+        stats = validator.backtest_with_confidence(df_features.copy(), min_conf)
+        results.append(stats)
+    
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 RESULTADOS COMPARATIVOS")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    # Create comparison table
+    print_comparison_table(results, args.days)
+    
+    # Best configuration analysis
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🏆 ANÁLISE DE MELHOR CONFIGURAÇÃO")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    analyze_best_config(results)
+
+
+def print_comparison_table(results, days):
+    """Print comparison table."""
+    
+    header = f"{'Conf':<6} | {'Trades':<7} | {'WR':<6} | {'ROI':<8} | {'ROI/yr':<8} | {'PF':<6} | {'Sharpe':<7} | {'DD':<7} | {'Avg Conf':<9}"
+    logger.info(header)
+    logger.info("-" * len(header))
+    
+    for r in results:
+        if r.get('total_trades', 0) > 0:
+            roi_yearly = r['roi'] / (days / 365)
+            line = (f"{r['min_confidence']*100:>5.0f}% | "
+                   f"{r['total_trades']:>7,} | "
+                   f"{r['win_rate']*100:>5.1f}% | "
+                   f"{r['roi']:>+7.1f}% | "
+                   f"{roi_yearly:>+7.1f}% | "
+                   f"{r['profit_factor']:>5.2f} | "
+                   f"{r['sharpe_ratio']:>6.2f} | "
+                   f"{r['max_drawdown']:>6.1f}% | "
+                   f"{r['avg_ml_confidence']*100:>8.1f}%")
+            logger.info(line)
+        else:
+            logger.info(f"{r['min_confidence']*100:>5.0f}% | No trades")
+
+
+def analyze_best_config(results):
+    """Analyze and recommend best configuration."""
+    
+    valid_results = [r for r in results if r.get('total_trades', 0) > 0]
+    
+    if not valid_results:
+        logger.info("❌ No valid results to analyze")
+        return
+    
+    # Best by different metrics
+    best_roi = max(valid_results, key=lambda x: x['roi'])
+    best_sharpe = max(valid_results, key=lambda x: x['sharpe_ratio'])
+    best_wr = max(valid_results, key=lambda x: x['win_rate'])
+    min_dd = min(valid_results, key=lambda x: x['max_drawdown'])
+    most_trades = max(valid_results, key=lambda x: x['total_trades'])
+    
+    logger.info("🎯 Melhor ROI:")
+    logger.info(f"   Confiança Mínima: {best_roi['min_confidence']:.0%}")
+    logger.info(f"   ROI: {best_roi['roi']:+.2f}%")
+    logger.info(f"   Win Rate: {best_roi['win_rate']*100:.1f}%")
+    logger.info(f"   Trades: {best_roi['total_trades']}")
+    logger.info("")
+    
+    logger.info("📈 Melhor Sharpe Ratio:")
+    logger.info(f"   Confiança Mínima: {best_sharpe['min_confidence']:.0%}")
+    logger.info(f"   Sharpe: {best_sharpe['sharpe_ratio']:.2f}")
+    logger.info(f"   ROI: {best_sharpe['roi']:+.2f}%")
+    logger.info(f"   Trades: {best_sharpe['total_trades']}")
+    logger.info("")
+    
+    logger.info("🎯 Melhor Win Rate:")
+    logger.info(f"   Confiança Mínima: {best_wr['min_confidence']:.0%}")
+    logger.info(f"   Win Rate: {best_wr['win_rate']*100:.1f}%")
+    logger.info(f"   ROI: {best_wr['roi']:+.2f}%")
+    logger.info(f"   Trades: {best_wr['total_trades']}")
+    logger.info("")
+    
+    logger.info("💪 Menor Drawdown:")
+    logger.info(f"   Confiança Mínima: {min_dd['min_confidence']:.0%}")
+    logger.info(f"   Max DD: {min_dd['max_drawdown']:.2f}%")
+    logger.info(f"   ROI: {min_dd['roi']:+.2f}%")
+    logger.info(f"   Trades: {min_dd['total_trades']}")
+    logger.info("")
+    
+    # Recommendation
+    logger.info("=" * 80)
+    logger.info("💡 RECOMENDAÇÃO")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    # Score each config
+    scores = []
+    for r in valid_results:
+        if r['total_trades'] < 20:  # Too few trades
+            continue
+        
+        score = 0
+        # ROI weight: 30%
+        score += (r['roi'] / max(x['roi'] for x in valid_results)) * 0.3
+        # Sharpe weight: 25%
+        score += (r['sharpe_ratio'] / max(x['sharpe_ratio'] for x in valid_results)) * 0.25
+        # Win Rate weight: 20%
+        score += (r['win_rate'] / max(x['win_rate'] for x in valid_results)) * 0.2
+        # Min DD weight: 15% (inverse)
+        score += (1 - abs(r['max_drawdown']) / max(abs(x['max_drawdown']) for x in valid_results)) * 0.15
+        # Trade count weight: 10% (prefer more trades for statistical significance)
+        score += (r['total_trades'] / max(x['total_trades'] for x in valid_results)) * 0.1
+        
+        scores.append((r, score))
+    
+    if scores:
+        best = max(scores, key=lambda x: x[1])
+        r = best[0]
+        
+        logger.info(f"🏆 Configuração Recomendada:")
+        logger.info(f"   MIN_ML_CONFIDENCE={r['min_confidence']:.2f}")
+        logger.info("")
+        logger.info(f"📊 Métricas:")
+        logger.info(f"   Total Trades: {r['total_trades']}")
+        logger.info(f"   Win Rate: {r['win_rate']*100:.1f}%")
+        logger.info(f"   ROI: {r['roi']:+.2f}%")
+        logger.info(f"   Sharpe: {r['sharpe_ratio']:.2f}")
+        logger.info(f"   Max DD: {r['max_drawdown']:.2f}%")
+        logger.info(f"   Profit Factor: {r['profit_factor']:.2f}")
+        logger.info(f"   Avg Confidence: {r['avg_ml_confidence']*100:.1f}%")
+        logger.info("")
+        logger.info(f"💾 Adicione no seu .env:")
+        logger.info(f"   MIN_ML_CONFIDENCE={r['min_confidence']}")
+    
+    logger.info("")
+    logger.info("=" * 80)
+
+
+if __name__ == "__main__":
+    main()
