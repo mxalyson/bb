@@ -957,12 +957,100 @@ class LiveTradingBot:
         self.position = None
         self.last_trade_time = datetime.now()
 
+    def recover_open_positions(self):
+        """
+        Recover any open positions from Bybit when bot starts.
+        This allows bot to resume monitoring existing positions.
+        """
+        if self.dry_run:
+            logger.info("📋 Paper trading mode - no positions to recover")
+            return
+
+        try:
+            logger.info("🔍 Checking for open positions on Bybit...")
+            positions = self.rest_client.get_positions(symbol=self.symbol)
+
+            if positions and 'retCode' in positions and positions['retCode'] == 0:
+                if 'result' in positions and 'list' in positions['result']:
+                    pos_list = positions['result']['list']
+
+                    for pos in pos_list:
+                        if pos['symbol'] == self.symbol:
+                            size = float(pos.get('size', 0))
+
+                            if size > 0:
+                                # Found open position!
+                                side = pos.get('side', '')
+                                entry_price = float(pos.get('avgPrice', 0))
+                                mark_price = float(pos.get('markPrice', 0))
+                                sl = float(pos.get('stopLoss', 0)) if pos.get('stopLoss') else None
+                                tp = float(pos.get('takeProfit', 0)) if pos.get('takeProfit') else None
+
+                                direction = 'long' if side == 'Buy' else 'short'
+
+                                logger.info("")
+                                logger.info("=" * 80)
+                                logger.info("🔄 RECOVERED OPEN POSITION FROM BYBIT")
+                                logger.info("=" * 80)
+                                logger.info(f"Direction: {direction.upper()}")
+                                logger.info(f"Size: {size} BTC")
+                                logger.info(f"Entry: ${entry_price:,.2f}")
+                                logger.info(f"Current: ${mark_price:,.2f}")
+                                if sl:
+                                    logger.info(f"SL: ${sl:,.2f}")
+                                if tp:
+                                    logger.info(f"TP: ${tp:,.2f}")
+                                logger.info("=" * 80)
+
+                                # Recreate position state
+                                self.position = {
+                                    'symbol': self.symbol,
+                                    'direction': direction,
+                                    'entry_price': entry_price,
+                                    'entry_time': datetime.now(),  # Unknown actual entry time
+                                    'qty': size,
+                                    'size': size * entry_price,
+                                    'stop_loss': sl,
+                                    'take_profit': tp,
+                                    'confidence': 0.0,  # Unknown
+                                    'order_id': None,
+                                    'is_paper': False,
+                                    'atr': 0
+                                }
+
+                                self.last_price = mark_price
+
+                                # Telegram notification
+                                direction_emoji = "🟢" if direction == 'long' else "🔴"
+                                self.telegram.send(
+                                    f"{direction_emoji} <b>POSITION RECOVERED</b>\n\n"
+                                    f"Direction: {direction.upper()}\n"
+                                    f"Size: {size} BTC\n"
+                                    f"Entry: ${entry_price:,.2f}\n"
+                                    f"Current: ${mark_price:,.2f}\n\n"
+                                    f"Bot will now monitor this position"
+                                )
+
+                                return
+
+                    logger.info("✅ No open positions found")
+            else:
+                logger.warning(f"⚠️ API error checking positions: {positions}")
+
+        except Exception as e:
+            logger.error(f"❌ Error recovering positions: {e}")
+            import traceback
+            traceback.print_exc()
+
     def run(self):
         """Main trading loop."""
 
         logger.info("🚀 Starting trading loop...")
         logger.info("Press Ctrl+C to stop")
         logger.info("")
+
+        # Try to recover any open positions from Bybit
+        self.recover_open_positions()
 
         try:
             while True:
@@ -1038,13 +1126,12 @@ class LiveTradingBot:
             logger.info("")
             logger.info("🛑 Stopping bot...")
 
-            # Close any open position
+            # Don't close position - let it continue on Bybit
             if self.position:
-                logger.info("Closing open position...")
-                df = self.get_current_data()
-                self.close_position(df.iloc[-1], 'manual_stop')
+                logger.info("⚠️ Position left open on Bybit (will recover on restart)")
+                logger.info(f"   {self.position['direction'].upper()} @ ${self.position['entry_price']:,.2f}")
 
-            self.telegram.send("🛑 <b>Bot Stopped</b>")
+            self.telegram.send("🛑 <b>Bot Stopped</b>\n\n⚠️ Position left open (if any)")
             logger.info("✅ Bot stopped cleanly")
 
 
