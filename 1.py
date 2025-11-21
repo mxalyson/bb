@@ -440,10 +440,11 @@ def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
 
 class StrategyValidator:
     """Valida a estratégia com diferentes configurações."""
-    
-    def __init__(self, config: dict, model_path: str):
+
+    def __init__(self, config: dict, model_path: str, verbose_trades: bool = False):
         self.config = config
         self.model_path = Path(model_path)
+        self.verbose_trades = verbose_trades  # Control trade-by-trade logging
 
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
@@ -502,13 +503,21 @@ class StrategyValidator:
         position = None
         capital = self.initial_capital
         cooldown = 0
-        
+
+        logger.info("=" * 80)
+        logger.info("🚀 STARTING BACKTEST SIMULATION")
+        logger.info("=" * 80)
+        logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
+        logger.info(f"Risk per Trade: {self.risk_per_trade*100:.2f}%")
+        logger.info(f"Total Candles: {len(df):,}")
+        logger.info("")
+
         for i in range(len(df)):
             current = df.iloc[i]
-            
+
             if cooldown > 0:
                 cooldown -= 1
-            
+
             # Check exit
             if position:
                 exit_reason = self._check_exit(position, current, i)
@@ -518,23 +527,73 @@ class StrategyValidator:
                     capital += trade['pnl_amount']
                     position = None
                     cooldown = 4
-            
+
             # Check entry
             if not position and current['signal'] != 0 and cooldown == 0 and i < len(df) - 20:
                 position = self._open_trade(current, capital, i)
-        
+
         # Close final position
         if position:
             trade = self._close_trade(position, df.iloc[-1], 'end_of_data')
             trades.append(trade)
-        
+
+        # DEBUG: Summary
+        if trades:
+            winning_trades = [t for t in trades if t['pnl_amount'] > 0]
+            losing_trades = [t for t in trades if t['pnl_amount'] <= 0]
+
+            # Count by exit reason
+            reasons = {}
+            for t in trades:
+                reason = t['reason']
+                reasons[reason] = reasons.get(reason, 0) + 1
+
+            logger.info("=" * 80)
+            logger.info("📊 BACKTEST SUMMARY")
+            logger.info("=" * 80)
+            logger.info(f"Total Trades: {len(trades)}")
+            logger.info(f"  ✅ Winners: {len(winning_trades)} ({len(winning_trades)/len(trades)*100:.1f}%)")
+            logger.info(f"  ❌ Losers: {len(losing_trades)} ({len(losing_trades)/len(trades)*100:.1f}%)")
+            logger.info("")
+            logger.info("Exit Reasons:")
+            for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+                reason_display = {
+                    'stop_loss': '🛑 Stop Loss',
+                    'take_profit_1': '🎯 TP1',
+                    'take_profit_2': '🎯 TP2',
+                    'take_profit_3': '🎯 TP3',
+                    'time_exit': '⏰ Time Exit',
+                    'end_of_data': '🏁 End of Data'
+                }.get(reason, reason)
+                logger.info(f"  {reason_display}: {count} ({count/len(trades)*100:.1f}%)")
+
+            # Direction breakdown
+            longs = [t for t in trades if t['direction'] == 'long']
+            shorts = [t for t in trades if t['direction'] == 'short']
+            long_wins = [t for t in longs if t['pnl_amount'] > 0]
+            short_wins = [t for t in shorts if t['pnl_amount'] > 0]
+
+            logger.info("")
+            logger.info("Direction Breakdown:")
+            if longs:
+                logger.info(f"  🟢 Longs: {len(longs)} ({len(long_wins)/len(longs)*100:.1f}% WR)")
+            if shorts:
+                logger.info(f"  🔴 Shorts: {len(shorts)} ({len(short_wins)/len(shorts)*100:.1f}% WR)")
+
+            logger.info("")
+            logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
+            logger.info(f"Final Capital: ${capital:,.2f}")
+            logger.info(f"Total PnL: ${capital - self.initial_capital:+,.2f} ({(capital/self.initial_capital - 1)*100:+.2f}%)")
+            logger.info("=" * 80)
+            logger.info("")
+
         return trades
     
     def _open_trade(self, current, capital, idx):
         direction = 'long' if current['signal'] == 1 else 'short'
         price = current['close']
         atr = current.get('atr', price * 0.01)
-        
+
         if direction == 'long':
             sl = price - (atr * 2.0)
             tp1 = price + (atr * 1.0)
@@ -545,12 +604,19 @@ class StrategyValidator:
             tp1 = price - (atr * 1.0)
             tp2 = price - (atr * 2.0)
             tp3 = price - (atr * 3.0)
-        
+
         sl_dist = abs((sl - price) / price)
         risk_amt = capital * self.risk_per_trade
         size = risk_amt / sl_dist if sl_dist > 0 else capital * 0.1
         size = min(size, capital * 0.95)
-        
+
+        # DEBUG: Log trade entry (if verbose)
+        if self.verbose_trades:
+            direction_emoji = "🟢" if direction == 'long' else "🔴"
+            logger.info(f"{direction_emoji} ENTRY #{idx}: {direction.upper()} @ ${price:,.2f}")
+            logger.info(f"   Confidence: {current['ml_confidence']:.1%} | Size: ${size:,.2f} | Capital: ${capital:,.2f}")
+            logger.info(f"   SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%) | TP1: ${tp1:,.2f} | TP2: ${tp2:,.2f} | TP3: ${tp3:,.2f}")
+
         return {
             'entry_idx': idx,
             'entry_time': current.name,
@@ -605,17 +671,39 @@ class StrategyValidator:
             exit_price = position['tp3']
         else:
             exit_price = current['close']
-        
+
         entry = position['entry_price']
         direction = position['direction']
-        
+
         if direction == 'long':
             pnl_pct = ((exit_price - entry) / entry) * 100
         else:
             pnl_pct = ((entry - exit_price) / entry) * 100
-        
+
         pnl_amount = position['size'] * (pnl_pct / 100)
-        
+
+        # DEBUG: Log trade exit (if verbose)
+        if self.verbose_trades:
+            is_win = pnl_amount > 0
+            result_emoji = "✅" if is_win else "❌"
+
+            # Reason emoji
+            reason_map = {
+                'stop_loss': '🛑 STOP LOSS',
+                'take_profit_1': '🎯 TP1',
+                'take_profit_2': '🎯 TP2',
+                'take_profit_3': '🎯 TP3',
+                'time_exit': '⏰ TIME EXIT',
+                'end_of_data': '🏁 END'
+            }
+            reason_display = reason_map.get(reason, reason.upper())
+
+            direction_emoji = "🟢" if direction == 'long' else "🔴"
+            logger.info(f"{result_emoji} EXIT {direction_emoji} {direction.upper()}: {reason_display}")
+            logger.info(f"   Entry: ${entry:,.2f} → Exit: ${exit_price:,.2f}")
+            logger.info(f"   PnL: {pnl_pct:+.2f}% (${pnl_amount:+,.2f}) | Duration: {position['entry_time']} → {current.name}")
+            logger.info("")
+
         return {
             'entry_time': position['entry_time'],
             'exit_time': current.name,
@@ -701,7 +789,8 @@ def main():
     parser.add_argument('--symbol', type=str, default='BTCUSDT')
     parser.add_argument('--days', type=int, default=180)
     parser.add_argument('--model', type=str, default='ml_model_master_scalper_365d.pkl')
-    
+    parser.add_argument('--verbose-trades', action='store_true', help='Show detailed log for each trade (entry/exit)')
+
     args = parser.parse_args()
     
     config = load_config('standard')
@@ -791,10 +880,12 @@ def main():
 
     # Validate strategy
     try:
-        validator = StrategyValidator(config, model_path)
+        validator = StrategyValidator(config, model_path, verbose_trades=args.verbose_trades)
         logger.info(f"🎯 Using threshold: {validator.optimal_threshold:.3f}")
         if validator.optimal_threshold != 0.5:
             logger.info(f"   (Optimized threshold from V2 model)")
+        if args.verbose_trades:
+            logger.info(f"   📢 Verbose trade logging: ENABLED")
         logger.info("")
     except Exception as e:
         logger.error(f"❌ Failed to load model: {e}")
