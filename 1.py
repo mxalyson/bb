@@ -684,11 +684,14 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
 class StrategyValidator:
     """Valida a estratégia com diferentes configurações."""
 
-    def __init__(self, config: dict, model_path: str, verbose_trades: bool = False, fee_type: str = 'taker'):
+    def __init__(self, config: dict, model_path: str, verbose_trades: bool = False, fee_type: str = 'taker',
+                 sl_atr_mult: float = 2.0, tp_atr_mult: float = 1.0):
         self.config = config
         self.model_path = Path(model_path)
         self.verbose_trades = verbose_trades  # Control trade-by-trade logging
         self.fee_type = fee_type  # 'maker' or 'taker'
+        self.sl_atr_mult = sl_atr_mult  # Stop loss ATR multiplier
+        self.tp_atr_mult = tp_atr_mult  # Take profit ATR multiplier
 
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
@@ -1045,11 +1048,11 @@ class StrategyValidator:
         atr = current.get('atr', price * 0.01)
 
         if direction == 'long':
-            sl = price - (atr * 2.0)
-            tp1 = price + (atr * 1.0)  # Apenas TP1
+            sl = price - (atr * self.sl_atr_mult)
+            tp1 = price + (atr * self.tp_atr_mult)
         else:
-            sl = price + (atr * 2.0)
-            tp1 = price - (atr * 1.0)  # Apenas TP1
+            sl = price + (atr * self.sl_atr_mult)
+            tp1 = price - (atr * self.tp_atr_mult)
 
         sl_dist = abs((sl - price) / price)
         risk_amt = capital * self.risk_per_trade
@@ -1629,7 +1632,92 @@ def analyze_best_config(results):
         logger.info("")
         logger.info(f"💾 Adicione no seu .env:")
         logger.info(f"   MIN_ML_CONFIDENCE={r['min_confidence']}")
-    
+
+    # ========================================================================
+    # TEST DIFFERENT ATR MULTIPLIERS
+    # ========================================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🎯 TESTANDO DIFERENTES ATR MULTIPLIERS")
+    logger.info("=" * 80)
+    logger.info("")
+
+    # Use best confidence from previous test
+    best_min_conf = best_roi['min_confidence']
+    logger.info(f"Usando MIN_CONFIDENCE = {best_min_conf:.2f} (melhor ROI)")
+    logger.info("")
+
+    # Test ATR combinations
+    atr_tests = [
+        (2.0, 1.0, "2.0x SL, 1.0x TP (padrão)"),
+        (2.0, 0.8, "2.0x SL, 0.8x TP"),
+        (2.0, 0.7, "2.0x SL, 0.7x TP"),
+        (1.5, 1.0, "1.5x SL, 1.0x TP"),
+        (1.5, 0.8, "1.5x SL, 0.8x TP"),
+        (1.5, 0.7, "1.5x SL, 0.7x TP"),
+    ]
+
+    atr_results = []
+
+    for sl_mult, tp_mult, desc in atr_tests:
+        logger.info(f"Testando {desc}...")
+
+        # Create new validator with these ATR settings
+        validator_atr = StrategyValidator(
+            config,
+            model_path,
+            verbose_trades=False,
+            fee_type=args.fee_type,
+            sl_atr_mult=sl_mult,
+            tp_atr_mult=tp_mult
+        )
+
+        # Run backtest with best confidence
+        stats = validator_atr.backtest_with_confidence(df_features.copy(), best_min_conf)
+
+        atr_results.append({
+            'sl_mult': sl_mult,
+            'tp_mult': tp_mult,
+            'desc': desc,
+            'total_trades': stats.get('total_trades', 0),
+            'win_rate': stats.get('win_rate', 0),
+            'roi': stats.get('roi', 0),
+            'sharpe': stats.get('sharpe_ratio', 0),
+            'max_dd': stats.get('max_drawdown', 0),
+            'profit_factor': stats.get('profit_factor', 0)
+        })
+
+    # Display ATR results
+    logger.info("")
+    logger.info("📊 RESULTADOS ATR MULTIPLIERS")
+    logger.info("=" * 80)
+    logger.info(f"{'ATR Config':<25} | Trades |  WR   |   ROI   | Sharpe | MaxDD | PF")
+    logger.info("-" * 80)
+
+    for r in atr_results:
+        if r['total_trades'] > 0:
+            logger.info(
+                f"{r['desc']:<25} | {r['total_trades']:>6} | "
+                f"{r['win_rate']*100:>5.1f}% | {r['roi']:>+7.2f}% | "
+                f"{r['sharpe']:>6.2f} | {r['max_dd']:>5.1f}% | {r['profit_factor']:>4.2f}"
+            )
+
+    # Find best ATR by ROI
+    best_atr = max([r for r in atr_results if r['total_trades'] > 0],
+                   key=lambda x: x['roi'], default=None)
+
+    if best_atr:
+        logger.info("")
+        logger.info("🏆 MELHOR CONFIGURAÇÃO ATR (por ROI):")
+        logger.info(f"   {best_atr['desc']}")
+        logger.info(f"   ROI: {best_atr['roi']:+.2f}%")
+        logger.info(f"   Win Rate: {best_atr['win_rate']*100:.1f}%")
+        logger.info(f"   Sharpe: {best_atr['sharpe']:.2f}")
+        logger.info("")
+        logger.info(f"💾 Adicione no seu .env:")
+        logger.info(f"   SL_ATR_MULT={best_atr['sl_mult']}")
+        logger.info(f"   TP_ATR_MULT={best_atr['tp_mult']}")
+
     logger.info("")
     logger.info("=" * 80)
 
