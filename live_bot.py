@@ -527,11 +527,12 @@ class LiveTradingBot:
         lookback_days = 30
 
         try:
+            # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
             df = self.data_manager.get_data(
-                symbol=self.symbol,
-                timeframe=f'{self.timeframe}m',
-                lookback_days=lookback_days,
-                use_cache=False
+                self.symbol,
+                f'{self.timeframe}m',
+                lookback_days,
+                False  # use_cache=False
             )
 
             if df.empty:
