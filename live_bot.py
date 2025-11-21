@@ -24,11 +24,107 @@ from core.utils import load_config, setup_logging
 from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
+from decimal import Decimal, ROUND_DOWN, getcontext
 
 # Load environment variables
 load_dotenv()
 
 logger = None
+getcontext().prec = 28
+
+
+# ============================================================================
+# BYBIT HELPERS (tick/step rounding + market meta)
+# ============================================================================
+
+def _to_decimal(x):
+    """Convert to Decimal safely."""
+    try:
+        return Decimal(str(x))
+    except:
+        return Decimal(0)
+
+
+def round_to_step(value: float, step: float) -> float:
+    """Round value to step size."""
+    step_d = _to_decimal(step)
+    if step_d <= 0:
+        return float(value)
+    v = _to_decimal(value)
+    q = (v // step_d) * step_d
+    return float(q)
+
+
+def round_price(value: float, tick: float) -> float:
+    """Round price to tick size."""
+    return round_to_step(value, tick)
+
+
+def round_qty(value: float, step: float, min_qty: float) -> float:
+    """Round quantity to step size, ensuring minimum."""
+    q = round_to_step(value, step)
+    if q < min_qty:
+        q = _to_decimal(min_qty)
+    return float(q)
+
+
+def fetch_market_meta(rest_client, symbol: str):
+    """
+    Fetch tickSize, qtyStep, minOrderQty from exchange.
+    Fallbacks for BTCUSDT/ETHUSDT if API fails.
+    """
+    # Default values by symbol
+    if 'ETH' in symbol:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+    elif 'BTC' in symbol:
+        tick = 0.1
+        step = 0.001
+        min_qty = 0.001
+    else:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+
+    try:
+        meta = rest_client.get_instruments_info(symbol=symbol)
+
+        if meta and meta.get('retCode') == 0:
+            lst = meta.get('result', {}).get('list', [])
+            if lst:
+                info = lst[0]
+                if 'priceFilter' in info and 'tickSize' in info['priceFilter']:
+                    tick = float(info['priceFilter']['tickSize'])
+                if 'lotSizeFilter' in info:
+                    lf = info['lotSizeFilter']
+                    if 'qtyStep' in lf:
+                        step = float(lf['qtyStep'])
+                    if 'minOrderQty' in lf:
+                        min_qty = float(lf['minOrderQty'])
+                logger.info(f"   ✅ Market meta: tick={tick}, step={step}, min_qty={min_qty}")
+        else:
+            logger.warning(f"   ⚠️ API error, using fallback")
+    except Exception as e:
+        logger.warning(f"   ⚠️ fetch_market_meta error: {e}, using fallback")
+
+    return tick, step, min_qty
+
+
+def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0):
+    """Execute function with exponential backoff retry."""
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"   Retry {attempt + 1}/{max_retries} failed: {e}. Waiting {delay}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, 16.0)
+            else:
+                logger.error(f"   All {max_retries} retries failed: {e}")
+    return None
 
 
 # ============================================================================
@@ -375,9 +471,22 @@ class LiveTradingBot:
         self.feature_names = self.model_data['feature_names']
         self.optimal_threshold = self.model_data['optimal_threshold']
 
+        # Fetch market meta (tick size, qty step, min qty)
+        logger.info("📊 Fetching market metadata...")
+        try:
+            self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, self.symbol)
+        except Exception as e:
+            logger.warning(f"   ⚠️ Error fetching market meta: {e}. Using fallback.")
+            # Fallback for BTCUSDT
+            self.tick_size = 0.1
+            self.qty_step = 0.001
+            self.min_qty = 0.001
+
         # State
         self.position: Optional[Dict] = None
         self.last_trade_time: Optional[datetime] = None
+        self.capital = self.initial_capital
+        self.last_price: Optional[float] = None
 
         logger.info("=" * 80)
         logger.info("🤖 LIVE TRADING BOT - SNIPER MODE")
@@ -447,12 +556,25 @@ class LiveTradingBot:
         if not self.position:
             return False
 
+        # Update last_price for tracking
+        self.last_price = current_candle['close']
+
+        # For REAL trading, check if Bybit closed the position
+        if not self.position.get('is_paper', True):
+            closed = self.check_position_closed()
+            if closed:
+                exit_price, reason = closed
+                self.close_position(current_candle, reason, close=exit_price)
+                return True
+            return False
+
+        # For PAPER mode, check locally
         high = current_candle['high']
         low = current_candle['low']
         close = current_candle['close']
         direction = self.position['direction']
 
-        # Check stop loss
+        # Check stop loss and take profit
         if direction == 'long':
             if low <= self.position['stop_loss']:
                 self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
@@ -470,67 +592,266 @@ class LiveTradingBot:
 
         return False
 
+    def calculate_position_size(self, price: float, sl_price: float) -> float:
+        """Calculate BTC quantity based on risk."""
+        sl_dist = abs((sl_price - price) / price)
+        risk_amt = self.capital * self.risk_per_trade
+
+        qty_btc = (risk_amt / sl_dist) / price if sl_dist > 0 else self.min_qty
+        qty_btc = max(self.min_qty, qty_btc)
+
+        return qty_btc
+
     def open_position(self, current_candle, signal, confidence):
-        """Open a new position."""
+        """Open a new position with automatic SL/TP on Bybit."""
 
         direction = 'long' if signal == 1 else 'short'
         price = current_candle['close']
         atr = current_candle.get('atr', price * 0.01)
 
-        # Calculate SL and TP
+        # Calculate SL and TP (raw values)
         if direction == 'long':
             sl = price - (atr * self.sl_atr_mult)
             tp = price + (atr * self.tp_atr_mult)
+            side = 'Buy'
         else:
             sl = price + (atr * self.sl_atr_mult)
             tp = price - (atr * self.tp_atr_mult)
+            side = 'Sell'
 
-        # Calculate position size
-        sl_dist = abs((sl - price) / price)
-        risk_amt = self.initial_capital * self.risk_per_trade
-        size = risk_amt / sl_dist if sl_dist > 0 else self.initial_capital * 0.1
-        size = min(size, self.initial_capital * 0.95)
+        # Calculate quantity in BTC
+        qty_btc = self.calculate_position_size(price, sl)
 
-        self.position = {
-            'direction': direction,
-            'entry_price': price,
-            'entry_time': current_candle.name,
-            'stop_loss': sl,
-            'take_profit': tp,
-            'size': size,
-            'confidence': confidence,
-            'atr': atr
-        }
+        # Round prices and quantities using market meta
+        sl = round_price(sl, self.tick_size)
+        tp = round_price(tp, self.tick_size)
+        qty_btc = round_qty(qty_btc, self.qty_step, self.min_qty)
+        price = round_price(price, self.tick_size)
+        size_usd = qty_btc * price
 
-        # Log
+        # VALIDATIONS
+        if qty_btc < self.min_qty:
+            logger.error(f"❌ Quantity {qty_btc} BTC below minimum {self.min_qty}!")
+            return
+
+        if size_usd < 10:
+            logger.warning(f"⚠️ Size too small: ${size_usd:,.2f} < $10")
+            return
+
+        # Validate SL makes sense
+        if direction == 'long' and sl >= price:
+            logger.error(f"❌ Invalid SL for LONG: ${sl:,.2f} >= ${price:,.2f}")
+            return
+        if direction == 'short' and sl <= price:
+            logger.error(f"❌ Invalid SL for SHORT: ${sl:,.2f} <= ${price:,.2f}")
+            return
+
+        # Validate TP makes sense
+        if direction == 'long' and tp <= price:
+            logger.error(f"❌ Invalid TP for LONG: ${tp:,.2f} <= ${price:,.2f}")
+            return
+        if direction == 'short' and tp >= price:
+            logger.error(f"❌ Invalid TP for SHORT: ${tp:,.2f} >= ${price:,.2f}")
+            return
+
+        # Log position details
         direction_emoji = "🟢" if direction == 'long' else "🔴"
         logger.info("")
         logger.info("=" * 80)
         logger.info(f"{direction_emoji} OPENING {direction.upper()} POSITION")
         logger.info("=" * 80)
-        logger.info(f"Time: {current_candle.name}")
         logger.info(f"Price: ${price:,.2f}")
         logger.info(f"Confidence: {confidence:.1%}")
-        logger.info(f"Size: ${size:,.2f}")
-        logger.info(f"Stop Loss: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
-        logger.info(f"Take Profit: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
+        logger.info(f"Qty: {qty_btc} BTC = ${size_usd:,.2f}")
+        logger.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
+        logger.info(f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
         logger.info(f"ATR: ${atr:,.2f}")
         logger.info("=" * 80)
 
+        order_id = None
+        actual_entry_price = price
+        is_paper = self.dry_run
+
+        # Execute real order if not dry run
+        if not self.dry_run:
+            try:
+                logger.info(f"💰 Sending REAL {side} order...")
+
+                # Place Market order
+                order = self.rest_client.place_order(
+                    symbol=self.symbol,
+                    side=side,
+                    order_type='Market',
+                    qty=qty_btc
+                )
+
+                logger.info(f"📥 API Response: {order}")
+
+                if order and 'retCode' in order and order['retCode'] == 0:
+                    if 'result' in order and isinstance(order['result'], dict):
+                        result = order['result']
+
+                        if 'orderId' in result:
+                            order_id = result['orderId']
+                            logger.info(f"✅ Order executed! ID: {order_id}")
+
+                            # Get actual fill price if available
+                            if 'price' in result and result['price']:
+                                try:
+                                    actual_entry_price = float(result['price'])
+                                except:
+                                    actual_entry_price = price
+
+                        # Configure SL/TP with retry
+                        logger.info(f"📍 Setting SL/TP on Bybit...")
+                        logger.info(f"   SL: ${sl:,.1f} | TP: ${tp:,.1f}")
+
+                        # Wait for position to be created (CRITICAL!)
+                        logger.info("⏳ Waiting for position to be created...")
+                        time.sleep(3)
+
+                        # Verify position exists
+                        position_exists = False
+                        try:
+                            positions = self.rest_client.get_positions(symbol=self.symbol)
+                            positions_list = positions.get('result', {}).get('list', [])
+                            for pos in positions_list:
+                                if float(pos.get('size', 0)) > 0:
+                                    position_exists = True
+                                    logger.info(f"✅ Position confirmed: {pos.get('size')} BTC")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error verifying position: {e}")
+
+                        if not position_exists:
+                            logger.error(f"❌ Position not created - cannot set SL/TP!")
+                        else:
+                            # Set SL/TP with retry
+                            def _set_sl_tp():
+                                sl_tp_result = self.rest_client.set_trading_stop(
+                                    category='linear',
+                                    symbol=self.symbol,
+                                    stopLoss=str(sl),
+                                    takeProfit=str(tp),
+                                    positionIdx=0
+                                )
+
+                                if sl_tp_result and 'retCode' in sl_tp_result and sl_tp_result['retCode'] == 0:
+                                    logger.info(f"✅ SL/TP configured on Bybit!")
+                                    return True
+                                else:
+                                    error_msg = sl_tp_result.get('retMsg', 'Unknown') if sl_tp_result else 'No response'
+                                    raise Exception(f"API error: {error_msg}")
+
+                            result = retry_with_backoff(_set_sl_tp, max_retries=3, initial_delay=2.0)
+                            if not result:
+                                logger.error(f"❌ Failed to set SL/TP after retries!")
+
+                else:
+                    raise Exception("API error - order failed")
+
+            except Exception as e:
+                logger.error(f"❌ Order execution failed: {e}")
+                self.telegram.send(f"❌ <b>Order Failed</b>\n\n{e}")
+                return
+
+        # Save position
+        self.position = {
+            'symbol': self.symbol,
+            'direction': direction,
+            'entry_price': actual_entry_price,
+            'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'qty': qty_btc,
+            'size': size_usd,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'confidence': confidence,
+            'order_id': order_id,
+            'is_paper': is_paper,
+            'atr': atr
+        }
+
+        self.last_price = actual_entry_price
+
         # Telegram notification
+        mode_str = "📝 PAPER" if is_paper else "💰 REAL"
         self.telegram.send(
-            f"{direction_emoji} <b>{direction.upper()} ENTRY</b>\n\n"
-            f"Price: ${price:,.2f}\n"
-            f"Confidence: {confidence:.1%}\n"
-            f"Size: ${size:,.2f}\n\n"
-            f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)\n"
-            f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)"
+            f"{direction_emoji} <b>{direction.upper()} ENTRY</b> {mode_str}\n\n"
+            f"Price: ${actual_entry_price:,.2f}\n"
+            f"Qty: {qty_btc} BTC (${size_usd:,.2f})\n"
+            f"Confidence: {confidence:.1%}\n\n"
+            f"🛑 SL: ${sl:,.2f}\n"
+            f"🎯 TP: ${tp:,.2f}\n\n"
+            f"Order ID: {order_id if order_id else 'N/A'}"
         )
 
-        # TODO: Execute actual trade if not dry_run
-        if not self.dry_run:
-            # self.execute_order(direction, price, size, sl, tp)
-            pass
+    def check_position_closed(self) -> Optional[tuple]:
+        """
+        Check if Bybit closed the position (SL/TP hit).
+        Only checks - does NOT close locally.
+        Returns: (exit_price, reason) if closed, None if still open
+        """
+        if not self.position or self.position.get('is_paper', True):
+            return None
+
+        try:
+            positions = self.rest_client.get_positions(symbol=self.position['symbol'])
+
+            if positions and 'retCode' in positions and positions['retCode'] == 0:
+                if 'result' in positions and 'list' in positions['result']:
+                    pos_list = positions['result']['list']
+
+                    for pos in pos_list:
+                        if pos['symbol'] == self.position['symbol']:
+                            size = float(pos.get('size', 0))
+
+                            # Position still open
+                            if size > 0:
+                                # Update last_price for tracking
+                                mark_price = float(pos.get('markPrice', 0))
+                                if mark_price > 0:
+                                    self.last_price = mark_price
+                                return None
+
+                            # Position closed
+                            else:
+                                logger.info("✅ Position closed by Bybit")
+
+                                # Use last_price as exit_price
+                                exit_price = self.last_price if self.last_price else self.position['entry_price']
+
+                                # Determine reason
+                                entry = self.position['entry_price']
+                                direction = self.position['direction']
+                                sl = self.position['stop_loss']
+                                tp = self.position['take_profit']
+
+                                tolerance = entry * 0.001
+
+                                if abs(exit_price - sl) <= tolerance:
+                                    reason = 'stop_loss'
+                                elif abs(exit_price - tp) <= tolerance:
+                                    reason = 'take_profit'
+                                else:
+                                    # Fallback logic
+                                    if direction == 'long':
+                                        reason = 'stop_loss' if exit_price < entry else 'take_profit'
+                                    else:
+                                        reason = 'stop_loss' if exit_price > entry else 'take_profit'
+
+                                logger.info(f"✅ Exit: ${exit_price:,.2f} ({reason})")
+                                return (exit_price, reason)
+
+                    # Position not found = was closed
+                    logger.info("✅ Position not found - was closed")
+                    exit_price = self.last_price if self.last_price else self.position['take_profit']
+                    return (exit_price, 'take_profit')
+
+        except Exception as e:
+            logger.error(f"⚠️ Error checking position: {e}")
+            return None
+
+        return None
 
     def close_position(self, current_candle, reason, close=None):
         """Close current position."""
