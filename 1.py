@@ -759,6 +759,68 @@ class StrategyValidator:
 
         return df
 
+    def _predict_from_wrapper(self, X):
+        """Make predictions from ModelWrapper ensemble."""
+        # ModelWrapper structure:
+        # - models_list: list of models
+        # - model_weights: weights for each model
+        # - scaler: scaler for normalization (optional)
+
+        try:
+            # Apply scaler if exists
+            if hasattr(self.model, 'scaler') and self.model.scaler is not None:
+                X_scaled = self.model.scaler.transform(X)
+            else:
+                X_scaled = X.values if hasattr(X, 'values') else X
+
+            # Get predictions from each model
+            if hasattr(self.model, 'models_list') and self.model.models_list:
+                predictions = []
+
+                for i, model in enumerate(self.model.models_list):
+                    try:
+                        # Try predict_proba first (for classifiers)
+                        if hasattr(model, 'predict_proba'):
+                            pred = model.predict_proba(X_scaled)
+                            # Get probability of class 1
+                            if len(pred.shape) > 1 and pred.shape[1] > 1:
+                                pred = pred[:, 1]
+                        # Fall back to predict
+                        elif hasattr(model, 'predict'):
+                            pred = model.predict(X_scaled)
+                        else:
+                            logger.warning(f"   ⚠️  Model {i} has no predict method, skipping")
+                            continue
+
+                        predictions.append(pred)
+                    except Exception as e:
+                        logger.warning(f"   ⚠️  Error predicting with model {i}: {str(e)[:50]}")
+                        continue
+
+                if not predictions:
+                    raise ValueError("No model could make predictions")
+
+                # Combine predictions with weights if available
+                if hasattr(self.model, 'model_weights') and self.model.model_weights:
+                    # Weighted average
+                    weights = np.array(self.model.model_weights[:len(predictions)])
+                    weights = weights / weights.sum()  # Normalize
+
+                    final_pred = np.zeros_like(predictions[0])
+                    for pred, weight in zip(predictions, weights):
+                        final_pred += pred * weight
+                else:
+                    # Simple average
+                    final_pred = np.mean(predictions, axis=0)
+
+                return final_pred
+            else:
+                raise ValueError("ModelWrapper has no models_list")
+
+        except Exception as e:
+            logger.error(f"   ❌ Error in _predict_from_wrapper: {str(e)}")
+            raise
+
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
 
@@ -778,6 +840,10 @@ class StrategyValidator:
             # If model doesn't have predict, maybe it's an ensemble wrapper
             if hasattr(self.model, '__call__'):
                 ml_probs = self.model(X)
+            elif hasattr(self.model, 'models_list'):
+                # ModelWrapper with ensemble
+                logger.info(f"   🔄 Using ensemble prediction from ModelWrapper")
+                ml_probs = self._predict_from_wrapper(X)
             else:
                 raise ValueError("Model has no predict() or __call__() method")
 
