@@ -56,12 +56,20 @@ print("=" * 80)
 print()
 
 
-def download_btc_data(days=365):
+def download_btc_data(days=180):
     """Download real BTC data from Bybit."""
     print(f"📥 Downloading {days} days of real BTC data from Bybit...")
 
     try:
-        # Import Bybit client
+        # Try to import from bot's core module
+        import sys
+        import os
+
+        # Add bot directory to path
+        bot_dir = Path(__file__).parent
+        if str(bot_dir) not in sys.path:
+            sys.path.insert(0, str(bot_dir))
+
         from core.data_manager import DataManager
         from core.rest_client import RestClient
 
@@ -82,9 +90,86 @@ def download_btc_data(days=365):
 
         return df
 
+    except ImportError as e:
+        print(f"   ⚠️  Cannot import bot modules: {e}")
+        print(f"   📥 Trying alternative download method...")
+
+        try:
+            # Alternative: use pybit directly
+            from pybit.unified_trading import HTTP
+
+            session = HTTP(testnet=False)
+
+            # Calculate timestamps
+            end_time = int(datetime.now().timestamp() * 1000)
+            start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+
+            all_data = []
+            current_end = end_time
+
+            print(f"   Downloading in batches...")
+
+            while current_end > start_time:
+                response = session.get_kline(
+                    category="linear",
+                    symbol="BTCUSDT",
+                    interval="15",
+                    end=current_end,
+                    limit=1000
+                )
+
+                if response['retCode'] != 0:
+                    print(f"   ❌ API Error: {response['retMsg']}")
+                    break
+
+                data = response['result']['list']
+
+                if not data:
+                    break
+
+                all_data.extend(data)
+
+                # Get oldest timestamp from this batch
+                current_end = int(data[-1][0]) - 1
+
+                print(f"   Downloaded {len(all_data)} candles...", end='\r')
+
+                if len(all_data) >= days * 96:  # 96 candles per day (15min)
+                    break
+
+            print(f"\n   ✅ Downloaded {len(all_data):,} candles")
+
+            # Convert to DataFrame
+            df = pd.DataFrame(all_data, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+            ])
+
+            # Convert types
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+
+            # Set index and sort
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
+            df = df[['open', 'high', 'low', 'close', 'volume']]
+
+            print(f"   📊 Date range: {df.index[0]} to {df.index[-1]}")
+            print(f"   💰 Price range: ${df['close'].min():,.0f} - ${df['close'].max():,.0f}")
+            print()
+
+            return df
+
+        except Exception as e2:
+            print(f"   ❌ Alternative download failed: {e2}")
+            print()
+            print("   💡 Solutions:")
+            print("      1. Install pybit: pip install pybit")
+            print("      2. Or run from bot directory where core/ exists")
+            return None
+
     except Exception as e:
-        print(f"   ❌ Error downloading data: {e}")
-        print(f"   💡 Make sure the bot is properly configured")
+        print(f"   ❌ Error: {e}")
         return None
 
 
