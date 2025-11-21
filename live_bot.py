@@ -360,9 +360,14 @@ class LiveTradingBot:
         self.telegram = TelegramNotifier(telegram_token, telegram_chat)
 
         # Exchange client
-        self.rest_client = BybitRESTClient(self.config)
+        self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
+        self.rest_client = BybitRESTClient(
+            api_key=os.getenv('BYBIT_API_KEY', ''),
+            api_secret=os.getenv('BYBIT_API_SECRET', ''),
+            testnet=self.bybit_testnet
+        )
         self.data_manager = DataManager(self.rest_client)
-        self.feature_store = FeatureStore(self.rest_client, self.data_manager, self.config)
+        self.feature_store = FeatureStore(self.config)
 
         # Load model
         self.model_data = load_model_universal(self.model_path)
@@ -385,16 +390,25 @@ class LiveTradingBot:
         logger.info(f"SL: {self.sl_atr_mult}x ATR | TP: {self.tp_atr_mult}x ATR")
         logger.info(f"Trade Cooldown: {self.trade_cooldown}s ({self.trade_cooldown/60:.1f}min)")
         logger.info(f"Mode: {'🔵 DRY RUN' if self.dry_run else '🔴 LIVE TRADING'}")
+        logger.info(f"Exchange: {'TESTNET' if self.bybit_testnet else 'MAINNET'}")
         logger.info("=" * 80)
 
+        # Warning for live trading
+        if not self.dry_run and not self.bybit_testnet:
+            logger.warning("⚠️" * 20)
+            logger.warning("⚠️ REAL TRADING MODE ON MAINNET!")
+            logger.warning("⚠️" * 20)
+
         # Send startup notification
+        network = 'TESTNET' if self.bybit_testnet else 'MAINNET'
         self.telegram.send(
             f"🤖 <b>Bot Started</b>\n\n"
             f"Symbol: {self.symbol}\n"
             f"Timeframe: {self.timeframe}m\n"
             f"Min Confidence: {self.min_confidence*100:.0f}%\n"
             f"Risk: {self.risk_per_trade*100:.2f}%\n"
-            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
+            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}\n"
+            f"Network: {network}"
         )
 
     def get_current_data(self) -> pd.DataFrame:
