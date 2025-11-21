@@ -684,10 +684,11 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
 class StrategyValidator:
     """Valida a estratégia com diferentes configurações."""
 
-    def __init__(self, config: dict, model_path: str, verbose_trades: bool = False):
+    def __init__(self, config: dict, model_path: str, verbose_trades: bool = False, fee_type: str = 'taker'):
         self.config = config
         self.model_path = Path(model_path)
         self.verbose_trades = verbose_trades  # Control trade-by-trade logging
+        self.fee_type = fee_type  # 'maker' or 'taker'
 
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
@@ -702,12 +703,16 @@ class StrategyValidator:
         self.initial_capital = config.get('initial_capital', 10000)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
 
-        # Bybit trading fees (taker fee for market orders)
-        self.trading_fee = config.get('trading_fee', 0.00055)  # 0.055% taker fee
+        # Bybit trading fees
+        if fee_type == 'maker':
+            self.trading_fee = config.get('maker_fee', 0.0002)  # 0.02% maker fee (or rebate)
+        else:
+            self.trading_fee = config.get('taker_fee', 0.00055)  # 0.055% taker fee
 
         # Detect model type based on features
         self.model_type = self._detect_model_type()
         logger.info(f"   🎯 Detected model type: {self.model_type}")
+        logger.info(f"   💰 Fee mode: {fee_type.upper()} ({self.trading_fee*100:.3f}%)")
 
     def _detect_model_type(self) -> str:
         """Detect model type based on required features."""
@@ -1025,9 +1030,12 @@ class StrategyValidator:
             logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
             logger.info(f"Final Capital: ${capital:,.2f}")
             logger.info(f"Total PnL: ${capital - self.initial_capital:+,.2f} ({(capital/self.initial_capital - 1)*100:+.2f}%)")
-            logger.info(f"Total Fees Paid: ${total_fees_paid:,.2f} (Bybit {self.trading_fee*100:.3f}% taker)")
+            logger.info(f"Total Fees Paid: ${total_fees_paid:,.2f} (Bybit {self.fee_type} {self.trading_fee*100:.3f}%)")
             logger.info("=" * 80)
             logger.info("")
+
+            # Print optimization recommendations
+            self._print_optimization_summary(trades, capital)
 
         return trades
     
@@ -1149,7 +1157,153 @@ class StrategyValidator:
             'reason': reason,
             'ml_confidence': position['ml_confidence']
         }
-    
+
+    def _analyze_by_confidence_ranges(self, trades):
+        """Analyze trades performance by confidence ranges."""
+        if not trades:
+            return []
+
+        # Define confidence ranges
+        ranges = [
+            (0.00, 0.20, "0.00-0.20"),
+            (0.20, 0.30, "0.20-0.30"),
+            (0.30, 0.40, "0.30-0.40"),
+            (0.40, 0.60, "0.40-0.60"),
+            (0.60, 1.00, "0.60-1.00")
+        ]
+
+        results = []
+
+        for min_conf, max_conf, label in ranges:
+            range_trades = [t for t in trades if min_conf <= t['ml_confidence'] < max_conf]
+
+            if not range_trades:
+                continue
+
+            winning = [t for t in range_trades if t['pnl_amount'] > 0]
+            total_pnl = sum(t['pnl_amount'] for t in range_trades)
+
+            results.append({
+                'range': label,
+                'min_conf': min_conf,
+                'max_conf': max_conf,
+                'total_trades': len(range_trades),
+                'winners': len(winning),
+                'win_rate': len(winning) / len(range_trades) if range_trades else 0,
+                'total_pnl': total_pnl,
+                'roi_pct': (total_pnl / self.initial_capital) * 100
+            })
+
+        return results
+
+    def _print_optimization_summary(self, all_trades, capital_final):
+        """Print optimization recommendations based on confidence analysis."""
+        if not all_trades:
+            return
+
+        logger.info("=" * 80)
+        logger.info("📊 PERFORMANCE BY CONFIDENCE RANGE")
+        logger.info("=" * 80)
+
+        ranges = self._analyze_by_confidence_ranges(all_trades)
+
+        # Print table
+        for r in ranges:
+            status = ""
+            if r['win_rate'] >= 0.80:
+                status = "✅✅"
+            elif r['win_rate'] >= 0.65:
+                status = "✅"
+            elif r['win_rate'] >= 0.50:
+                status = "⚠️"
+            else:
+                status = "❌"
+
+            logger.info(f"{r['range']:12s} | {r['total_trades']:3d} trades | WR: {r['win_rate']*100:5.1f}% | ROI: {r['roi_pct']:+6.2f}% {status}")
+
+        logger.info("")
+
+        # Find optimal threshold
+        best_threshold = 0.0
+        best_roi = float('-inf')
+        best_wr = 0.0
+
+        for threshold in [0.0, 0.20, 0.30, 0.40, 0.50, 0.60]:
+            filtered_trades = [t for t in all_trades if t['ml_confidence'] >= threshold]
+
+            if not filtered_trades:
+                continue
+
+            winning = [t for t in filtered_trades if t['pnl_amount'] > 0]
+            total_pnl = sum(t['pnl_amount'] for t in filtered_trades)
+            roi = (total_pnl / self.initial_capital) * 100
+            wr = len(winning) / len(filtered_trades)
+
+            if roi > best_roi:
+                best_roi = roi
+                best_threshold = threshold
+                best_wr = wr
+
+        # Print comparison
+        logger.info("💡 OPTIMIZATION RECOMMENDATIONS")
+        logger.info("=" * 80)
+
+        # Current results (no filter)
+        current_pnl = sum(t['pnl_amount'] for t in all_trades)
+        current_roi = (current_pnl / self.initial_capital) * 100
+        current_wr = len([t for t in all_trades if t['pnl_amount'] > 0]) / len(all_trades)
+
+        logger.info(f"Current Settings (no confidence filter):")
+        logger.info(f"   Total Trades: {len(all_trades)}")
+        logger.info(f"   Win Rate: {current_wr*100:.1f}%")
+        logger.info(f"   ROI: {current_roi:+.2f}%")
+        logger.info("")
+
+        # Optimal settings
+        optimal_trades = [t for t in all_trades if t['ml_confidence'] >= best_threshold]
+        logger.info(f"Recommended Settings (min_confidence >= {best_threshold:.2f}):")
+        logger.info(f"   Total Trades: {len(optimal_trades)}")
+        logger.info(f"   Win Rate: {best_wr*100:.1f}%")
+        logger.info(f"   ROI: {best_roi:+.2f}%")
+        logger.info("")
+
+        # Calculate impact
+        roi_improvement = best_roi - current_roi
+        wr_improvement = (best_wr - current_wr) * 100
+        trades_reduction = len(all_trades) - len(optimal_trades)
+
+        logger.info("Impact of Optimization:")
+        logger.info(f"   ✅ ROI improvement: {roi_improvement:+.2f}%")
+        logger.info(f"   ✅ WR improvement: {wr_improvement:+.1f}pp")
+        logger.info(f"   📉 Trades reduced: {trades_reduction} ({trades_reduction/len(all_trades)*100:.1f}%)")
+        logger.info("")
+
+        # Specific recommendations
+        logger.info("Actionable Recommendations:")
+
+        if best_threshold >= 0.30:
+            logger.info(f"   ✅ Use min_confidence >= {best_threshold:.2f}")
+        else:
+            logger.info(f"   ⚠️  Model works at all confidence levels (threshold: {best_threshold:.2f})")
+
+        if self.fee_type == 'taker':
+            # Estimate maker fee impact
+            maker_fee = 0.0002
+            taker_fee = self.trading_fee
+            fee_savings_per_trade = (taker_fee - maker_fee) * 2  # entry + exit
+            total_fee_savings = fee_savings_per_trade * len(optimal_trades) * self.initial_capital * self.risk_per_trade / 0.01
+
+            logger.info(f"   ✅ Switch to MAKER orders (estimated savings: ${total_fee_savings:.2f})")
+
+        # Risk suggestions
+        if current_wr >= 0.80:
+            logger.info(f"   📈 Consider increasing risk_per_trade to 1.0-1.25% (current: {self.risk_per_trade*100:.2f}%)")
+        elif current_wr < 0.60:
+            logger.info(f"   📉 Consider reducing risk_per_trade to 0.5% (current: {self.risk_per_trade*100:.2f}%)")
+
+        logger.info("=" * 80)
+        logger.info("")
+
     def _calculate_stats(self, trades, df, min_confidence):
         if not trades:
             return {
@@ -1223,6 +1377,7 @@ def main():
     parser.add_argument('--days', type=int, default=180)
     parser.add_argument('--model', type=str, default='ml_model_master_scalper_365d.pkl')
     parser.add_argument('--verbose-trades', action='store_true', help='Show detailed log for each trade (entry/exit)')
+    parser.add_argument('--fee-type', type=str, default='taker', choices=['maker', 'taker'], help='Fee type: maker (0.02%%) or taker (0.055%%)')
 
     args = parser.parse_args()
     
@@ -1313,7 +1468,7 @@ def main():
 
     # Validate strategy
     try:
-        validator = StrategyValidator(config, model_path, verbose_trades=args.verbose_trades)
+        validator = StrategyValidator(config, model_path, verbose_trades=args.verbose_trades, fee_type=args.fee_type)
         logger.info(f"🎯 Using threshold: {validator.optimal_threshold:.3f}")
         if validator.optimal_threshold != 0.5:
             logger.info(f"   (Optimized threshold from V2 model)")
