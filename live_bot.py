@@ -562,13 +562,18 @@ class LiveTradingBot:
         sl = self.position['stop_loss']
         tp = self.position['take_profit']
 
-        # Calculate unrealized PnL
+        # Calculate unrealized PnL (gross)
         if direction == 'long':
             pnl_pct = ((current_price - entry_price) / entry_price) * 100
         else:
             pnl_pct = ((entry_price - current_price) / entry_price) * 100
 
         pnl_amount = self.position['size'] * (pnl_pct / 100)
+
+        # Calculate fees (0.055% taker x2 for entry+exit)
+        fee = self.position['size'] * 0.00055 * 2
+        pnl_amount_net = pnl_amount - fee
+        pnl_pct_net = (pnl_amount_net / self.position['size']) * 100
 
         # Calculate distance to SL/TP
         if direction == 'long':
@@ -584,12 +589,12 @@ class LiveTradingBot:
         minutes = (duration.total_seconds() % 3600) / 60
 
         # Format output
-        pnl_emoji = "🟢" if pnl_amount > 0 else "🔴" if pnl_amount < 0 else "⚪"
+        pnl_emoji = "🟢" if pnl_amount_net > 0 else "🔴" if pnl_amount_net < 0 else "⚪"
         direction_emoji = "🟢" if direction == 'long' else "🔴"
 
         logger.info("")
-        logger.info(f"{direction_emoji} {direction.upper()} | Entry: ${entry_price:,.2f} | Current: ${current_price:,.2f}")
-        logger.info(f"{pnl_emoji} PnL: {pnl_pct:+.2f}% (${pnl_amount:+,.2f}) | Duration: {int(hours)}h {int(minutes)}m")
+        logger.info(f"{direction_emoji} {direction.upper()} | Entrada: ${entry_price:,.2f} | Atual: ${current_price:,.2f}")
+        logger.info(f"{pnl_emoji} PnL Líquido: {pnl_pct_net:+.2f}% (${pnl_amount_net:+,.2f}) | Duração: {int(hours)}h {int(minutes)}m")
         logger.info(f"🛑 SL: ${sl:,.2f} ({dist_sl:+.2f}%) | 🎯 TP: ${tp:,.2f} ({dist_tp:+.2f}%)")
 
     def check_position_exit(self, current_candle) -> bool:
@@ -702,11 +707,11 @@ class LiveTradingBot:
         direction_emoji = "🟢" if direction == 'long' else "🔴"
         logger.info("")
         logger.info("=" * 80)
-        logger.info(f"{direction_emoji} OPENING {direction.upper()} POSITION")
+        logger.info(f"{direction_emoji} ABRINDO POSIÇÃO {direction.upper()}")
         logger.info("=" * 80)
-        logger.info(f"Price: ${price:,.2f}")
-        logger.info(f"Confidence: {confidence:.1%}")
-        logger.info(f"Qty: {qty_btc} BTC = ${size_usd:,.2f}")
+        logger.info(f"Preço: ${price:,.2f}")
+        logger.info(f"Confiança: {confidence:.1%}")
+        logger.info(f"Qtd: {qty_btc} BTC = ${size_usd:,.2f}")
         logger.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
         logger.info(f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
         logger.info(f"ATR: ${atr:,.2f}")
@@ -820,10 +825,10 @@ class LiveTradingBot:
         # Telegram notification
         mode_str = "📝 PAPER" if is_paper else "💰 REAL"
         self.telegram.send(
-            f"{direction_emoji} <b>{direction.upper()} ENTRY</b> {mode_str}\n\n"
-            f"Price: ${actual_entry_price:,.2f}\n"
-            f"Qty: {qty_btc} BTC (${size_usd:,.2f})\n"
-            f"Confidence: {confidence:.1%}\n\n"
+            f"{direction_emoji} <b>ENTRADA {direction.upper()}</b> {mode_str}\n\n"
+            f"Preço: ${actual_entry_price:,.2f}\n"
+            f"Qtd: {qty_btc} BTC (${size_usd:,.2f})\n"
+            f"Confiança: {confidence:.1%}\n\n"
             f"🛑 SL: ${sl:,.2f}\n"
             f"🎯 TP: ${tp:,.2f}\n\n"
             f"Order ID: {order_id if order_id else 'N/A'}"
@@ -859,7 +864,7 @@ class LiveTradingBot:
 
                             # Position closed
                             else:
-                                logger.info("✅ Position closed by Bybit")
+                                logger.info("✅ Posição fechada pela Bybit")
 
                                 # Use last_price as exit_price
                                 exit_price = self.last_price if self.last_price else self.position['entry_price']
@@ -883,7 +888,7 @@ class LiveTradingBot:
                                     else:
                                         reason = 'stop_loss' if exit_price > entry else 'take_profit'
 
-                                logger.info(f"✅ Exit: ${exit_price:,.2f} ({reason})")
+                                logger.info(f"✅ Saída: ${exit_price:,.2f} ({reason})")
                                 return (exit_price, reason)
 
                     # Position not found = was closed
@@ -926,26 +931,27 @@ class LiveTradingBot:
         is_win = pnl_amount_after_fees > 0
         result_emoji = "✅" if is_win else "❌"
         reason_emoji = "🎯" if reason == 'take_profit' else "🛑"
+        reason_text = "GAIN/TAKE PROFIT" if reason == 'take_profit' else "STOP LOSS"
 
         logger.info("")
         logger.info("=" * 80)
-        logger.info(f"{result_emoji} CLOSING {direction.upper()} POSITION - {reason_emoji} {reason.upper().replace('_', ' ')}")
+        logger.info(f"{result_emoji} FECHANDO POSIÇÃO {direction.upper()} - {reason_emoji} {reason_text}")
         logger.info("=" * 80)
-        logger.info(f"Entry: ${entry_price:,.2f} @ {self.position['entry_time']}")
-        logger.info(f"Exit:  ${exit_price:,.2f} @ {current_candle.name}")
-        logger.info(f"Duration: {duration}")
-        logger.info(f"PnL: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})")
-        logger.info(f"Fees: ${fee:.2f}")
+        logger.info(f"Entrada: ${entry_price:,.2f} @ {self.position['entry_time']}")
+        logger.info(f"Saída:   ${exit_price:,.2f} @ {current_candle.name}")
+        logger.info(f"Duração: {duration}")
+        logger.info(f"PnL Líquido: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})")
+        logger.info(f"Taxas: ${fee:.2f}")
         logger.info("=" * 80)
 
         # Telegram notification
         self.telegram.send(
-            f"{result_emoji} <b>{direction.upper()} EXIT</b> - {reason_emoji} {reason.upper().replace('_', ' ')}\n\n"
-            f"Entry: ${entry_price:,.2f}\n"
-            f"Exit: ${exit_price:,.2f}\n"
-            f"Duration: {duration}\n\n"
-            f"<b>PnL: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})</b>\n"
-            f"Fees: ${fee:.2f}"
+            f"{result_emoji} <b>SAÍDA {direction.upper()}</b> - {reason_emoji} {reason_text}\n\n"
+            f"Entrada: ${entry_price:,.2f}\n"
+            f"Saída: ${exit_price:,.2f}\n"
+            f"Duração: {duration}\n\n"
+            f"<b>PnL Líquido: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})</b>\n"
+            f"Taxas: ${fee:.2f}"
         )
 
         # TODO: Execute actual close if not dry_run
@@ -990,12 +996,12 @@ class LiveTradingBot:
 
                                 logger.info("")
                                 logger.info("=" * 80)
-                                logger.info("🔄 RECOVERED OPEN POSITION FROM BYBIT")
+                                logger.info("🔄 POSIÇÃO RECUPERADA DA BYBIT")
                                 logger.info("=" * 80)
-                                logger.info(f"Direction: {direction.upper()}")
-                                logger.info(f"Size: {size} BTC")
-                                logger.info(f"Entry: ${entry_price:,.2f}")
-                                logger.info(f"Current: ${mark_price:,.2f}")
+                                logger.info(f"Direção: {direction.upper()}")
+                                logger.info(f"Tamanho: {size} BTC")
+                                logger.info(f"Entrada: ${entry_price:,.2f}")
+                                logger.info(f"Preço Atual: ${mark_price:,.2f}")
                                 if sl:
                                     logger.info(f"SL: ${sl:,.2f}")
                                 if tp:
@@ -1023,12 +1029,12 @@ class LiveTradingBot:
                                 # Telegram notification
                                 direction_emoji = "🟢" if direction == 'long' else "🔴"
                                 self.telegram.send(
-                                    f"{direction_emoji} <b>POSITION RECOVERED</b>\n\n"
-                                    f"Direction: {direction.upper()}\n"
-                                    f"Size: {size} BTC\n"
-                                    f"Entry: ${entry_price:,.2f}\n"
-                                    f"Current: ${mark_price:,.2f}\n\n"
-                                    f"Bot will now monitor this position"
+                                    f"{direction_emoji} <b>POSIÇÃO RECUPERADA</b>\n\n"
+                                    f"Direção: {direction.upper()}\n"
+                                    f"Tamanho: {size} BTC\n"
+                                    f"Entrada: ${entry_price:,.2f}\n"
+                                    f"Atual: ${mark_price:,.2f}\n\n"
+                                    f"Bot vai monitorar esta posição"
                                 )
 
                                 return
@@ -1073,7 +1079,7 @@ class LiveTradingBot:
                             time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
                             if time_since_last_trade < self.trade_cooldown:
                                 remaining = self.trade_cooldown - time_since_last_trade
-                                logger.info(f"⏳ Cooldown: {remaining:.0f}s remaining")
+                                logger.info(f"⏳ Cooldown: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
                                 time.sleep(10)
                                 continue
 
@@ -1097,14 +1103,14 @@ class LiveTradingBot:
                                 signal = -1  # short
                                 confidence = 1 - pred
 
-                            logger.info(f"🔮 Prediction: {pred:.3f} | Signal: {'LONG' if signal==1 else 'SHORT'} | Confidence: {confidence:.1%}")
+                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {'LONG' if signal==1 else 'SHORT'} | Confiança: {confidence:.1%}")
 
                             # Check if confidence meets threshold
                             if confidence >= self.min_confidence:
-                                logger.info(f"✅ Signal confidence {confidence:.1%} >= {self.min_confidence:.1%}")
+                                logger.info(f"✅ Confiança do sinal {confidence:.1%} >= {self.min_confidence:.1%}")
                                 self.open_position(current, signal, confidence)
                             else:
-                                logger.info(f"⏭️  Signal confidence {confidence:.1%} < {self.min_confidence:.1%} - skipping")
+                                logger.info(f"⏭️  Confiança {confidence:.1%} < {self.min_confidence:.1%} - pulando")
 
                         except Exception as e:
                             logger.error(f"Prediction error: {e}")
@@ -1124,15 +1130,15 @@ class LiveTradingBot:
 
         except KeyboardInterrupt:
             logger.info("")
-            logger.info("🛑 Stopping bot...")
+            logger.info("🛑 Parando bot...")
 
             # Don't close position - let it continue on Bybit
             if self.position:
-                logger.info("⚠️ Position left open on Bybit (will recover on restart)")
+                logger.info("⚠️ Posição deixada aberta na Bybit (será recuperada no restart)")
                 logger.info(f"   {self.position['direction'].upper()} @ ${self.position['entry_price']:,.2f}")
 
-            self.telegram.send("🛑 <b>Bot Stopped</b>\n\n⚠️ Position left open (if any)")
-            logger.info("✅ Bot stopped cleanly")
+            self.telegram.send("🛑 <b>Bot Parado</b>\n\n⚠️ Posição deixada aberta (se houver)")
+            logger.info("✅ Bot parado com sucesso")
 
 
 # ============================================================================
