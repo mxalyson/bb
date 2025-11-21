@@ -70,8 +70,8 @@ def download_btc_data(days=180):
         if str(bot_dir) not in sys.path:
             sys.path.insert(0, str(bot_dir))
 
-        from core.data_manager import DataManager
-        from core.rest_client import RestClient
+        from data import DataManager
+        from rest_client import RestClient
 
         rest = RestClient()
         data_mgr = DataManager(rest)
