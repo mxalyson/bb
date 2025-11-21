@@ -552,6 +552,46 @@ class LiveTradingBot:
             logger.error(f"❌ Error fetching data: {e}")
             raise
 
+    def show_position_status(self, current_price: float):
+        """Display current position status with unrealized PnL."""
+        if not self.position:
+            return
+
+        entry_price = self.position['entry_price']
+        direction = self.position['direction']
+        sl = self.position['stop_loss']
+        tp = self.position['take_profit']
+
+        # Calculate unrealized PnL
+        if direction == 'long':
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - current_price) / entry_price) * 100
+
+        pnl_amount = self.position['size'] * (pnl_pct / 100)
+
+        # Calculate distance to SL/TP
+        if direction == 'long':
+            dist_sl = ((current_price - sl) / sl) * 100
+            dist_tp = ((tp - current_price) / current_price) * 100
+        else:
+            dist_sl = ((sl - current_price) / current_price) * 100
+            dist_tp = ((current_price - tp) / tp) * 100
+
+        # Duration
+        duration = datetime.now() - self.position['entry_time']
+        hours = duration.total_seconds() / 3600
+        minutes = (duration.total_seconds() % 3600) / 60
+
+        # Format output
+        pnl_emoji = "🟢" if pnl_amount > 0 else "🔴" if pnl_amount < 0 else "⚪"
+        direction_emoji = "🟢" if direction == 'long' else "🔴"
+
+        logger.info("")
+        logger.info(f"{direction_emoji} {direction.upper()} | Entry: ${entry_price:,.2f} | Current: ${current_price:,.2f}")
+        logger.info(f"{pnl_emoji} PnL: {pnl_pct:+.2f}% (${pnl_amount:+,.2f}) | Duration: {int(hours)}h {int(minutes)}m")
+        logger.info(f"🛑 SL: ${sl:,.2f} ({dist_sl:+.2f}%) | 🎯 TP: ${tp:,.2f} ({dist_tp:+.2f}%)")
+
     def check_position_exit(self, current_candle) -> bool:
         """Check if current position should be exited."""
         if not self.position:
@@ -559,6 +599,9 @@ class LiveTradingBot:
 
         # Update last_price for tracking
         self.last_price = current_candle['close']
+
+        # Show current position status
+        self.show_position_status(current_candle['close'])
 
         # For REAL trading, check if Bybit closed the position
         if not self.position.get('is_paper', True):
