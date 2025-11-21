@@ -414,23 +414,33 @@ class LiveTradingBot:
     def get_current_data(self) -> pd.DataFrame:
         """Download latest data and build features."""
 
-        # Download last 200 candles (enough for indicators)
-        candles_needed = 200
-        df = self.data_manager.download_historical_data(
-            symbol=self.symbol,
-            interval=self.timeframe,
-            days=candles_needed * int(self.timeframe) / (24 * 60)  # Convert candles to days
-        )
+        # Download data (30 days lookback for indicators)
+        lookback_days = 30
 
-        logger.info(f"📥 Downloaded {len(df)} candles")
+        try:
+            df = self.data_manager.get_data(
+                symbol=self.symbol,
+                timeframe=f'{self.timeframe}m',
+                lookback_days=lookback_days,
+                use_cache=False
+            )
 
-        # Build features using FeatureStore
-        df_features = self.feature_store.build_features(df)
+            if df.empty:
+                raise ValueError("No data received")
 
-        # Create features matching training data
-        df_features = create_features_for_bot(df_features)
+            logger.info(f"📥 Downloaded {len(df)} candles")
 
-        return df_features
+            # Build features using FeatureStore
+            df_features = self.feature_store.build_features(df, normalize=False)
+
+            # Create features matching training data
+            df_features = create_features_for_bot(df_features)
+
+            return df_features
+
+        except Exception as e:
+            logger.error(f"❌ Error fetching data: {e}")
+            raise
 
     def check_position_exit(self, current_candle) -> bool:
         """Check if current position should be exited."""
