@@ -766,43 +766,86 @@ class StrategyValidator:
         # - model_weights: weights for each model
         # - scaler: scaler for normalization (optional)
 
+        import warnings
+
         try:
             # Apply scaler if exists
             if hasattr(self.model, 'scaler') and self.model.scaler is not None:
-                X_scaled = self.model.scaler.transform(X)
+                # Suppress sklearn feature name warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    X_scaled = self.model.scaler.transform(X)
             else:
                 X_scaled = X.values if hasattr(X, 'values') else X
 
             # Get predictions from each model
             if hasattr(self.model, 'models_list') and self.model.models_list:
                 predictions = []
+                model_names = getattr(self.model, 'model_names', [f'Model_{i}' for i in range(len(self.model.models_list))])
 
                 for i, model in enumerate(self.model.models_list):
+                    model_name = model_names[i] if i < len(model_names) else f'Model_{i}'
+                    model_type = type(model).__name__
+
                     try:
-                        # Try predict_proba first (for classifiers)
-                        if hasattr(model, 'predict_proba'):
-                            pred = model.predict_proba(X_scaled)
-                            # Get probability of class 1
-                            if len(pred.shape) > 1 and pred.shape[1] > 1:
-                                pred = pred[:, 1]
-                        # Fall back to predict
-                        elif hasattr(model, 'predict'):
-                            pred = model.predict(X_scaled)
+                        # Detect Deep Learning models (Keras/TensorFlow)
+                        is_dl = model_type in ['Sequential', 'Functional', 'Model'] or 'keras' in str(type(model)).lower()
+
+                        if is_dl:
+                            # Deep Learning models
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                # DL models need numpy array, may need reshape
+                                X_dl = np.array(X_scaled)
+                                if len(X_dl.shape) == 1:
+                                    X_dl = X_dl.reshape(-1, 1)
+
+                                pred = model.predict(X_dl, verbose=0)
+
+                                # Squeeze if needed
+                                if len(pred.shape) > 1:
+                                    if pred.shape[1] == 1:
+                                        pred = pred.squeeze()
+                                    else:
+                                        # Multi-class, get positive class
+                                        pred = pred[:, -1] if pred.shape[1] > 1 else pred.squeeze()
                         else:
-                            logger.warning(f"   ⚠️  Model {i} has no predict method, skipping")
-                            continue
+                            # Traditional ML models (LightGBM, XGBoost, etc.)
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+
+                                if hasattr(model, 'predict_proba'):
+                                    pred = model.predict_proba(X_scaled)
+                                    # Get probability of class 1
+                                    if len(pred.shape) > 1 and pred.shape[1] > 1:
+                                        pred = pred[:, 1]
+                                elif hasattr(model, 'predict'):
+                                    pred = model.predict(X_scaled)
+                                else:
+                                    continue
 
                         predictions.append(pred)
+
                     except Exception as e:
-                        logger.warning(f"   ⚠️  Error predicting with model {i}: {str(e)[:50]}")
+                        # Log error but continue with other models
+                        error_msg = str(e)[:80]
+                        if i == 0:
+                            # Only show first error to avoid spam
+                            logger.debug(f"   ⚠️  {model_name} ({model_type}) failed: {error_msg}")
                         continue
 
                 if not predictions:
                     raise ValueError("No model could make predictions")
 
+                # Report success rate
+                success_count = len(predictions)
+                total_count = len(self.model.models_list)
+                if success_count < total_count:
+                    logger.info(f"   📊 Ensemble: {success_count}/{total_count} models succeeded")
+
                 # Combine predictions with weights if available
                 if hasattr(self.model, 'model_weights') and self.model.model_weights:
-                    # Weighted average
+                    # Weighted average (only for successful models)
                     weights = np.array(self.model.model_weights[:len(predictions)])
                     weights = weights / weights.sum()  # Normalize
 
