@@ -1,0 +1,672 @@
+"""
+🤖 LIVE TRADING BOT - SNIPER MODE
+Baseado na análise de otimização do 1.py
+"""
+
+import sys
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+sys.path.append(str(Path(__file__).parent))
+
+import pandas as pd
+import numpy as np
+import logging
+import pickle
+import time
+import requests
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+import os
+from dotenv import load_dotenv
+
+from core.utils import load_config, setup_logging
+from core.bybit_rest import BybitRESTClient
+from core.data import DataManager
+from core.features import FeatureStore
+
+# Load environment variables
+load_dotenv()
+
+logger = None
+
+
+# ============================================================================
+# TELEGRAM NOTIFICATIONS
+# ============================================================================
+
+class TelegramNotifier:
+    """Send notifications to Telegram."""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.enabled = bool(bot_token and chat_id)
+
+        if self.enabled:
+            logger.info("📱 Telegram notifications: ENABLED")
+        else:
+            logger.warning("📱 Telegram notifications: DISABLED (missing credentials)")
+
+    def send(self, message: str):
+        """Send message to Telegram."""
+        if not self.enabled:
+            return
+
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            data = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            response = requests.post(url, data=data, timeout=10)
+
+            if response.status_code != 200:
+                logger.warning(f"Telegram error: {response.text}")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram: {e}")
+
+
+# ============================================================================
+# MODEL LOADING (from 1.py)
+# ============================================================================
+
+class ModelWrapper:
+    """Generic wrapper for models saved with custom classes."""
+    def __init__(self, model=None, feature_names=None, **kwargs):
+        self.model = model
+        self.feature_names = feature_names
+        self.__dict__.update(kwargs)
+
+
+class UniversalUnpickler(pickle.Unpickler):
+    """Custom unpickler that can handle missing classes."""
+    def find_class(self, module, name):
+        if name == 'ModelWrapper':
+            return ModelWrapper
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            return type(name, (), {})
+
+
+def load_model_universal(model_path: str) -> dict:
+    """Universal model loader."""
+    logger.info(f"🔍 Loading model: {model_path}")
+
+    try:
+        with open(model_path, 'rb') as f:
+            data = pickle.load(f)
+        logger.info(f"   ✅ Loaded with standard pickle")
+    except Exception:
+        with open(model_path, 'rb') as f:
+            data = UniversalUnpickler(f).load()
+        logger.info(f"   ✅ Loaded with custom unpickler")
+
+    result = {
+        'model': None,
+        'feature_names': None,
+        'optimal_threshold': 0.5,
+        'raw_data': data
+    }
+
+    data_type = type(data).__name__
+    logger.info(f"   📦 Type: {data_type}")
+
+    # Extract model info
+    if isinstance(data, dict):
+        result['model'] = data.get('model')
+        result['feature_names'] = data.get('feature_names', [])
+        result['optimal_threshold'] = data.get('optimal_threshold', 0.5)
+    elif hasattr(data, 'models_list'):
+        result['model'] = data
+        result['feature_names'] = getattr(data, 'feature_columns', [])
+        result['optimal_threshold'] = getattr(data, 'long_threshold', 0.5)
+    else:
+        result['model'] = data
+        if hasattr(data, 'feature_names_in_'):
+            result['feature_names'] = list(data.feature_names_in_)
+
+    logger.info(f"   📊 Features: {len(result['feature_names'])}")
+    logger.info(f"   🎯 Threshold: {result['optimal_threshold']:.3f}")
+
+    return result
+
+
+# ============================================================================
+# FEATURE ENGINEERING (from 1.py)
+# ============================================================================
+
+def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
+    """Create features matching train_with_real_data.py"""
+    logger.info("   Creating features (matching training data)...")
+
+    df_feat = df.copy()
+
+    # === BASIC FEATURES ===
+    df_feat['returns'] = df_feat['close'].pct_change()
+    df_feat['returns_5'] = df_feat['close'].pct_change(5)
+    df_feat['returns_10'] = df_feat['close'].pct_change(10)
+
+    # Volatility
+    df_feat['volatility_5'] = df_feat['returns'].rolling(5).std()
+    df_feat['volatility_20'] = df_feat['returns'].rolling(20).std()
+    df_feat['volatility_ratio'] = df_feat['volatility_5'] / (df_feat['volatility_20'] + 1e-8)
+
+    # ATR
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = abs(df_feat['low'] - df_feat['close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df_feat['atr'] = true_range.rolling(14).mean()
+    df_feat['atr_pct'] = df_feat['atr'] / df_feat['close'] * 100
+
+    # === MOMENTUM FEATURES ===
+    for period in [3, 5, 8, 13, 21]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    df_feat['momentum_accel'] = df_feat['momentum_5'].diff(3)
+
+    # === MOVING AVERAGES ===
+    for period in [7, 14, 21, 50, 100]:
+        df_feat[f'sma_{period}'] = df_feat['close'].rolling(period).mean()
+        df_feat[f'ema_{period}'] = df_feat['close'].ewm(span=period, adjust=False).mean()
+
+    df_feat['price_vs_sma7'] = (df_feat['close'] - df_feat['sma_7']) / df_feat['sma_7'] * 100
+    df_feat['price_vs_sma21'] = (df_feat['close'] - df_feat['sma_21']) / df_feat['sma_21'] * 100
+    df_feat['price_vs_ema14'] = (df_feat['close'] - df_feat['ema_14']) / df_feat['ema_14'] * 100
+
+    df_feat['sma7_above_sma21'] = (df_feat['sma_7'] > df_feat['sma_21']).astype(int)
+    df_feat['ema7_above_ema21'] = (df_feat['ema_7'] > df_feat['ema_21']).astype(int)
+
+    # === RSI ===
+    delta = df_feat['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
+    rs = gain / (loss + 1e-10)
+    df_feat['rsi'] = 100 - (100 / (1 + rs))
+
+    df_feat['rsi_oversold'] = (df_feat['rsi'] < 30).astype(int)
+    df_feat['rsi_overbought'] = (df_feat['rsi'] > 70).astype(int)
+    df_feat['rsi_neutral'] = ((df_feat['rsi'] >= 40) & (df_feat['rsi'] <= 60)).astype(int)
+
+    # === MACD ===
+    ema12 = df_feat['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_feat['close'].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    df_feat['macd_hist'] = macd - macd_signal
+    df_feat['macd_hist_increasing'] = (df_feat['macd_hist'] > df_feat['macd_hist'].shift(1)).astype(int)
+
+    # === BOLLINGER BANDS ===
+    sma20 = df_feat['close'].rolling(20).mean()
+    std20 = df_feat['close'].rolling(20).std()
+    df_feat['bb_upper'] = sma20 + (2 * std20)
+    df_feat['bb_lower'] = sma20 - (2 * std20)
+    df_feat['bb_width'] = (df_feat['bb_upper'] - df_feat['bb_lower']) / sma20 * 100
+    df_feat['bb_position'] = (df_feat['close'] - df_feat['bb_lower']) / (df_feat['bb_upper'] - df_feat['bb_lower'] + 1e-8)
+
+    # === VOLUME FEATURES ===
+    df_feat['volume_sma_20'] = df_feat['volume'].rolling(20).mean()
+    df_feat['volume_ratio'] = df_feat['volume'] / (df_feat['volume_sma_20'] + 1e-8)
+    df_feat['high_volume'] = (df_feat['volume_ratio'] > 1.5).astype(int)
+
+    # === CANDLE PATTERNS ===
+    body = abs(df_feat['close'] - df_feat['open'])
+    upper_wick = df_feat['high'] - df_feat[['close', 'open']].max(axis=1)
+    lower_wick = df_feat[['close', 'open']].min(axis=1) - df_feat['low']
+
+    df_feat['body_pct'] = body / df_feat['close'] * 100
+    df_feat['upper_wick_pct'] = upper_wick / df_feat['close'] * 100
+    df_feat['lower_wick_pct'] = lower_wick / df_feat['close'] * 100
+    df_feat['total_wick'] = upper_wick + lower_wick
+    df_feat['wick_body_ratio'] = df_feat['total_wick'] / (body + 1e-8)
+
+    is_green = (df_feat['close'] > df_feat['open']).astype(int)
+    is_red = (df_feat['close'] < df_feat['open']).astype(int)
+
+    df_feat['green_streak'] = (is_green * (is_green.groupby((is_green != is_green.shift()).cumsum()).cumcount() + 1))
+    df_feat['red_streak'] = (is_red * (is_red.groupby((is_red != is_red.shift()).cumsum()).cumcount() + 1))
+
+    # === PRICE ACTION ===
+    df_feat['higher_high'] = (df_feat['high'] > df_feat['high'].shift(1)).astype(int)
+    df_feat['lower_low'] = (df_feat['low'] < df_feat['low'].shift(1)).astype(int)
+    df_feat['hh_count'] = df_feat['higher_high'].rolling(10).sum()
+    df_feat['ll_count'] = df_feat['lower_low'].rolling(10).sum()
+
+    for period in [14, 50]:
+        high_period = df_feat['high'].rolling(period).max()
+        low_period = df_feat['low'].rolling(period).min()
+        df_feat[f'price_position_{period}'] = (df_feat['close'] - low_period) / (high_period - low_period + 1e-8)
+
+    # === ORDER FLOW (simulated) ===
+    close_position = (df_feat['close'] - df_feat['low']) / (df_feat['high'] - df_feat['low'] + 1e-8)
+    df_feat['taker_buy_ratio'] = close_position
+    df_feat['taker_sell_ratio'] = 1 - close_position
+
+    df_feat['buy_pressure'] = df_feat['taker_buy_ratio'].rolling(20).mean()
+    df_feat['sell_pressure'] = df_feat['taker_sell_ratio'].rolling(20).mean()
+    df_feat['pressure_delta'] = df_feat['buy_pressure'] - df_feat['sell_pressure']
+
+    # Fill NaN
+    df_feat = df_feat.fillna(method='bfill').fillna(0)
+
+    logger.info("   ✅ Features created (matching training)")
+    return df_feat
+
+
+def make_prediction(model, model_data, df, feature_names):
+    """Make prediction using ensemble model."""
+
+    # Check if using ModelWrapper ensemble
+    if hasattr(model, 'models_list'):
+        logger.info("   🔄 Using ensemble prediction from ModelWrapper")
+
+        # Prepare features
+        X = df[feature_names].values
+
+        # Apply scaler if exists
+        if hasattr(model, 'scaler') and model.scaler is not None:
+            X_scaled = model.scaler.transform(X)
+        else:
+            X_scaled = X
+
+        # Get predictions from all models
+        predictions = []
+        for i, sub_model in enumerate(model.models_list):
+            try:
+                # Check if deep learning model
+                model_type = type(sub_model).__name__
+                is_dl = model_type in ['Sequential', 'Functional', 'Model']
+
+                if is_dl:
+                    pred = sub_model.predict(X_scaled, verbose=0)
+                    if pred.ndim > 1:
+                        pred = pred[:, -1]
+                else:
+                    pred = sub_model.predict_proba(X_scaled)[:, 1]
+
+                predictions.append(pred)
+            except Exception as e:
+                logger.warning(f"   ⚠️  Model {i} failed: {e}")
+                continue
+
+        if not predictions:
+            raise ValueError("All models failed!")
+
+        # Weighted average
+        if hasattr(model, 'model_weights'):
+            weights = np.array(model.model_weights[:len(predictions)])
+            weights = weights / weights.sum()
+        else:
+            weights = np.ones(len(predictions)) / len(predictions)
+
+        final_pred = np.zeros_like(predictions[0])
+        for pred, weight in zip(predictions, weights):
+            final_pred += pred * weight
+
+        logger.info(f"   📊 Ensemble: {len(predictions)}/{len(model.models_list)} models succeeded")
+
+    else:
+        # Standard model
+        X = df[feature_names].values
+
+        if hasattr(model, 'predict_proba'):
+            final_pred = model.predict_proba(X)[:, 1]
+        else:
+            final_pred = model.predict(X)
+
+    return final_pred
+
+
+# ============================================================================
+# LIVE TRADING BOT
+# ============================================================================
+
+class LiveTradingBot:
+    """Live trading bot with sniper optimization."""
+
+    def __init__(self, config_path: str = 'config.yaml'):
+        global logger
+
+        # Load config
+        self.config = load_config('standard')
+        logger = setup_logging('INFO', log_to_file=True)
+
+        # Environment variables
+        self.symbol = os.getenv('SYMBOL', 'BTCUSDT')
+        self.timeframe = os.getenv('TIMEFRAME', '15')
+        self.model_path = os.getenv('MODEL_PATH', 'storage/models/real_btc_ensemble_20251120_234339.pkl')
+
+        # Trading parameters
+        self.min_confidence = float(os.getenv('MIN_ML_CONFIDENCE', '0.25'))
+        self.risk_per_trade = float(os.getenv('RISK_PER_TRADE_PCT', '0.75')) / 100
+        self.initial_capital = float(os.getenv('INITIAL_CAPITAL', '125.0'))
+
+        # Stop loss / Take profit multipliers
+        self.sl_atr_mult = float(os.getenv('SL_ATR_MULT', '2.0'))
+        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '1.0'))
+
+        # Cooldown between trades (seconds)
+        self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
+
+        # Dry run mode
+        self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+
+        # Telegram
+        telegram_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        telegram_chat = os.getenv('TELEGRAM_CHAT_ID', '')
+        self.telegram = TelegramNotifier(telegram_token, telegram_chat)
+
+        # Exchange client
+        self.rest_client = BybitRESTClient(self.config)
+        self.data_manager = DataManager(self.rest_client)
+        self.feature_store = FeatureStore(self.rest_client, self.data_manager, self.config)
+
+        # Load model
+        self.model_data = load_model_universal(self.model_path)
+        self.model = self.model_data['model']
+        self.feature_names = self.model_data['feature_names']
+        self.optimal_threshold = self.model_data['optimal_threshold']
+
+        # State
+        self.position: Optional[Dict] = None
+        self.last_trade_time: Optional[datetime] = None
+
+        logger.info("=" * 80)
+        logger.info("🤖 LIVE TRADING BOT - SNIPER MODE")
+        logger.info("=" * 80)
+        logger.info(f"Symbol: {self.symbol}")
+        logger.info(f"Timeframe: {self.timeframe}m")
+        logger.info(f"Model: {Path(self.model_path).name}")
+        logger.info(f"Min Confidence: {self.min_confidence*100:.0f}%")
+        logger.info(f"Risk per Trade: {self.risk_per_trade*100:.2f}%")
+        logger.info(f"SL: {self.sl_atr_mult}x ATR | TP: {self.tp_atr_mult}x ATR")
+        logger.info(f"Trade Cooldown: {self.trade_cooldown}s ({self.trade_cooldown/60:.1f}min)")
+        logger.info(f"Mode: {'🔵 DRY RUN' if self.dry_run else '🔴 LIVE TRADING'}")
+        logger.info("=" * 80)
+
+        # Send startup notification
+        self.telegram.send(
+            f"🤖 <b>Bot Started</b>\n\n"
+            f"Symbol: {self.symbol}\n"
+            f"Timeframe: {self.timeframe}m\n"
+            f"Min Confidence: {self.min_confidence*100:.0f}%\n"
+            f"Risk: {self.risk_per_trade*100:.2f}%\n"
+            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
+        )
+
+    def get_current_data(self) -> pd.DataFrame:
+        """Download latest data and build features."""
+
+        # Download last 200 candles (enough for indicators)
+        candles_needed = 200
+        df = self.data_manager.download_historical_data(
+            symbol=self.symbol,
+            interval=self.timeframe,
+            days=candles_needed * int(self.timeframe) / (24 * 60)  # Convert candles to days
+        )
+
+        logger.info(f"📥 Downloaded {len(df)} candles")
+
+        # Build features using FeatureStore
+        df_features = self.feature_store.build_features(df)
+
+        # Create features matching training data
+        df_features = create_features_for_bot(df_features)
+
+        return df_features
+
+    def check_position_exit(self, current_candle) -> bool:
+        """Check if current position should be exited."""
+        if not self.position:
+            return False
+
+        high = current_candle['high']
+        low = current_candle['low']
+        close = current_candle['close']
+        direction = self.position['direction']
+
+        # Check stop loss
+        if direction == 'long':
+            if low <= self.position['stop_loss']:
+                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                return True
+            if high >= self.position['take_profit']:
+                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                return True
+        else:  # short
+            if high >= self.position['stop_loss']:
+                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                return True
+            if low <= self.position['take_profit']:
+                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                return True
+
+        return False
+
+    def open_position(self, current_candle, signal, confidence):
+        """Open a new position."""
+
+        direction = 'long' if signal == 1 else 'short'
+        price = current_candle['close']
+        atr = current_candle.get('atr', price * 0.01)
+
+        # Calculate SL and TP
+        if direction == 'long':
+            sl = price - (atr * self.sl_atr_mult)
+            tp = price + (atr * self.tp_atr_mult)
+        else:
+            sl = price + (atr * self.sl_atr_mult)
+            tp = price - (atr * self.tp_atr_mult)
+
+        # Calculate position size
+        sl_dist = abs((sl - price) / price)
+        risk_amt = self.initial_capital * self.risk_per_trade
+        size = risk_amt / sl_dist if sl_dist > 0 else self.initial_capital * 0.1
+        size = min(size, self.initial_capital * 0.95)
+
+        self.position = {
+            'direction': direction,
+            'entry_price': price,
+            'entry_time': current_candle.name,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'size': size,
+            'confidence': confidence,
+            'atr': atr
+        }
+
+        # Log
+        direction_emoji = "🟢" if direction == 'long' else "🔴"
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info(f"{direction_emoji} OPENING {direction.upper()} POSITION")
+        logger.info("=" * 80)
+        logger.info(f"Time: {current_candle.name}")
+        logger.info(f"Price: ${price:,.2f}")
+        logger.info(f"Confidence: {confidence:.1%}")
+        logger.info(f"Size: ${size:,.2f}")
+        logger.info(f"Stop Loss: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
+        logger.info(f"Take Profit: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
+        logger.info(f"ATR: ${atr:,.2f}")
+        logger.info("=" * 80)
+
+        # Telegram notification
+        self.telegram.send(
+            f"{direction_emoji} <b>{direction.upper()} ENTRY</b>\n\n"
+            f"Price: ${price:,.2f}\n"
+            f"Confidence: {confidence:.1%}\n"
+            f"Size: ${size:,.2f}\n\n"
+            f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)\n"
+            f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)"
+        )
+
+        # TODO: Execute actual trade if not dry_run
+        if not self.dry_run:
+            # self.execute_order(direction, price, size, sl, tp)
+            pass
+
+    def close_position(self, current_candle, reason, close=None):
+        """Close current position."""
+        if not self.position:
+            return
+
+        exit_price = close if close else current_candle['close']
+        entry_price = self.position['entry_price']
+        direction = self.position['direction']
+
+        # Calculate PnL
+        if direction == 'long':
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+
+        pnl_amount = self.position['size'] * (pnl_pct / 100)
+
+        # Fees (0.055% taker)
+        fee = self.position['size'] * 0.00055 * 2  # entry + exit
+        pnl_amount_after_fees = pnl_amount - fee
+        pnl_pct_after_fees = (pnl_amount_after_fees / self.position['size']) * 100
+
+        # Duration
+        duration = current_candle.name - self.position['entry_time']
+
+        # Log
+        is_win = pnl_amount_after_fees > 0
+        result_emoji = "✅" if is_win else "❌"
+        reason_emoji = "🎯" if reason == 'take_profit' else "🛑"
+
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info(f"{result_emoji} CLOSING {direction.upper()} POSITION - {reason_emoji} {reason.upper().replace('_', ' ')}")
+        logger.info("=" * 80)
+        logger.info(f"Entry: ${entry_price:,.2f} @ {self.position['entry_time']}")
+        logger.info(f"Exit:  ${exit_price:,.2f} @ {current_candle.name}")
+        logger.info(f"Duration: {duration}")
+        logger.info(f"PnL: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})")
+        logger.info(f"Fees: ${fee:.2f}")
+        logger.info("=" * 80)
+
+        # Telegram notification
+        self.telegram.send(
+            f"{result_emoji} <b>{direction.upper()} EXIT</b> - {reason_emoji} {reason.upper().replace('_', ' ')}\n\n"
+            f"Entry: ${entry_price:,.2f}\n"
+            f"Exit: ${exit_price:,.2f}\n"
+            f"Duration: {duration}\n\n"
+            f"<b>PnL: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})</b>\n"
+            f"Fees: ${fee:.2f}"
+        )
+
+        # TODO: Execute actual close if not dry_run
+        if not self.dry_run:
+            # self.close_order(self.position['direction'])
+            pass
+
+        # Clear position
+        self.position = None
+        self.last_trade_time = datetime.now()
+
+    def run(self):
+        """Main trading loop."""
+
+        logger.info("🚀 Starting trading loop...")
+        logger.info("Press Ctrl+C to stop")
+        logger.info("")
+
+        try:
+            while True:
+                try:
+                    # Get current data
+                    df = self.get_current_data()
+
+                    # Get last candle
+                    current = df.iloc[-1]
+
+                    # Check if we have an open position
+                    if self.position:
+                        # Check exit conditions
+                        self.check_position_exit(current)
+
+                    # Check if we can open a new position
+                    else:
+                        # Check cooldown
+                        if self.last_trade_time:
+                            time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
+                            if time_since_last_trade < self.trade_cooldown:
+                                remaining = self.trade_cooldown - time_since_last_trade
+                                logger.info(f"⏳ Cooldown: {remaining:.0f}s remaining")
+                                time.sleep(10)
+                                continue
+
+                        # Make prediction
+                        try:
+                            predictions = make_prediction(
+                                self.model,
+                                self.model_data,
+                                df,
+                                self.feature_names
+                            )
+
+                            # Get prediction for current candle
+                            pred = predictions[-1]
+
+                            # Determine signal
+                            if pred >= self.optimal_threshold:
+                                signal = 1  # long
+                                confidence = pred
+                            else:
+                                signal = -1  # short
+                                confidence = 1 - pred
+
+                            logger.info(f"🔮 Prediction: {pred:.3f} | Signal: {'LONG' if signal==1 else 'SHORT'} | Confidence: {confidence:.1%}")
+
+                            # Check if confidence meets threshold
+                            if confidence >= self.min_confidence:
+                                logger.info(f"✅ Signal confidence {confidence:.1%} >= {self.min_confidence:.1%}")
+                                self.open_position(current, signal, confidence)
+                            else:
+                                logger.info(f"⏭️  Signal confidence {confidence:.1%} < {self.min_confidence:.1%} - skipping")
+
+                        except Exception as e:
+                            logger.error(f"Prediction error: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Wait before next iteration (no loop cooldown, just sleep a bit)
+                    time.sleep(5)
+
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in main loop: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(30)
+
+        except KeyboardInterrupt:
+            logger.info("")
+            logger.info("🛑 Stopping bot...")
+
+            # Close any open position
+            if self.position:
+                logger.info("Closing open position...")
+                df = self.get_current_data()
+                self.close_position(df.iloc[-1], 'manual_stop')
+
+            self.telegram.send("🛑 <b>Bot Stopped</b>")
+            logger.info("✅ Bot stopped cleanly")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    bot = LiveTradingBot()
+    bot.run()
+
+
+if __name__ == '__main__':
+    main()
