@@ -29,8 +29,25 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-# Import ModelWrapper from train_scalping_model
-exec(open('train_scalping_model.py').read().split('# ============================================================================')[0])
+# ============================================================================
+# MODEL WRAPPER CLASS
+# ============================================================================
+
+class ModelWrapper:
+    """Wrapper for ensemble model compatible with 1.py"""
+    def __init__(self, models_list, model_weights, model_names, scaler, feature_columns,
+                 long_threshold, short_threshold):
+        self.models_list = models_list
+        self.model_weights = model_weights
+        self.model_names = model_names
+        self.scaler = scaler
+        self.feature_columns = feature_columns
+        self.has_dl = False
+        self.long_threshold = long_threshold
+        self.short_threshold = short_threshold
+        self.lookback = 100
+        self.version = "1.0_real_btc"
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 print("=" * 80)
@@ -330,15 +347,135 @@ def main():
     print(f"   {len(X_train_scaled):,} → {len(X_train_balanced):,} samples")
     print()
 
-    # Train ensemble (import from train_scalping_model)
-    from train_scalping_model import train_ensemble_model, find_optimal_threshold
+    # Train ensemble
+    print("🤖 Training ensemble models...")
+    print()
 
-    models, model_names, model_weights = train_ensemble_model(
-        X_train_balanced, y_train_balanced,
-        X_val_scaled, y_val
+    models = []
+    model_names = []
+    model_weights = []
+
+    # Model 1: LightGBM
+    print("   1️⃣  Training LightGBM...")
+    lgb = LGBMClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=7,
+        num_leaves=31,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        class_weight='balanced',
+        random_state=42,
+        verbosity=-1
     )
+    lgb.fit(X_train_balanced, y_train_balanced)
+    val_pred_lgb = lgb.predict_proba(X_val_scaled)[:, 1]
+    auc_lgb = roc_auc_score(y_val, val_pred_lgb)
+    print(f"      ✅ LightGBM AUC: {auc_lgb:.4f}")
+    models.append(lgb)
+    model_names.append('LightGBM')
+    model_weights.append(auc_lgb)
 
-    optimal_threshold = find_optimal_threshold(models, model_weights, X_val_scaled, y_val)
+    # Model 2: XGBoost
+    print("   2️⃣  Training XGBoost...")
+    xgb = XGBClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=7,
+        min_child_weight=1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=(y_train_balanced == 0).sum() / (y_train_balanced == 1).sum(),
+        random_state=42,
+        verbosity=0
+    )
+    xgb.fit(X_train_balanced, y_train_balanced)
+    val_pred_xgb = xgb.predict_proba(X_val_scaled)[:, 1]
+    auc_xgb = roc_auc_score(y_val, val_pred_xgb)
+    print(f"      ✅ XGBoost AUC: {auc_xgb:.4f}")
+    models.append(xgb)
+    model_names.append('XGBoost')
+    model_weights.append(auc_xgb)
+
+    # Model 3: CatBoost
+    print("   3️⃣  Training CatBoost...")
+    cat = CatBoostClassifier(
+        iterations=500,
+        learning_rate=0.05,
+        depth=7,
+        l2_leaf_reg=3,
+        random_state=42,
+        verbose=False,
+        auto_class_weights='Balanced'
+    )
+    cat.fit(X_train_balanced, y_train_balanced)
+    val_pred_cat = cat.predict_proba(X_val_scaled)[:, 1]
+    auc_cat = roc_auc_score(y_val, val_pred_cat)
+    print(f"      ✅ CatBoost AUC: {auc_cat:.4f}")
+    models.append(cat)
+    model_names.append('CatBoost')
+    model_weights.append(auc_cat)
+
+    # Model 4: Random Forest
+    print("   4️⃣  Training Random Forest...")
+    rf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=10,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1
+    )
+    rf.fit(X_train_balanced, y_train_balanced)
+    val_pred_rf = rf.predict_proba(X_val_scaled)[:, 1]
+    auc_rf = roc_auc_score(y_val, val_pred_rf)
+    print(f"      ✅ Random Forest AUC: {auc_rf:.4f}")
+    models.append(rf)
+    model_names.append('RandomForest')
+    model_weights.append(auc_rf)
+
+    print()
+    print(f"   🎯 Ensemble: 4 models | Avg AUC: {np.mean(model_weights):.4f}")
+    print()
+
+    # Find optimal threshold
+    print("🎯 Finding optimal threshold...")
+
+    predictions = []
+    for model in models:
+        pred = model.predict_proba(X_val_scaled)[:, 1]
+        predictions.append(pred)
+
+    weights = np.array(model_weights)
+    weights = weights / weights.sum()
+
+    ensemble_pred = np.zeros_like(predictions[0])
+    for pred, weight in zip(predictions, weights):
+        ensemble_pred += pred * weight
+
+    best_threshold = 0.5
+    best_f1 = 0
+
+    for threshold in np.arange(0.3, 0.7, 0.01):
+        y_pred = (ensemble_pred >= threshold).astype(int)
+
+        tp = ((y_pred == 1) & (y_val == 1)).sum()
+        fp = ((y_pred == 1) & (y_val == 0)).sum()
+        fn = ((y_pred == 0) & (y_val == 1)).sum()
+
+        precision = tp / (tp + fp + 1e-10)
+        recall = tp / (tp + fn + 1e-10)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-10)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+
+    optimal_threshold = best_threshold
+    print(f"   ✅ Optimal threshold: {optimal_threshold:.3f} (F1: {best_f1:.4f})")
+    print()
 
     # Test
     print("📊 Testing on holdout set...")
