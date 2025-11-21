@@ -453,6 +453,10 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
 
     logger.info("   Creating ultra_scalper features...")
 
+    # === BASIC RETURNS (for compatibility) ===
+    df_feat['returns_5'] = df_feat['close'].pct_change(5)
+    df_feat['returns_10'] = df_feat['close'].pct_change(10)
+
     # === CANDLE FEATURES ===
     body = abs(df_feat['close'] - df_feat['open'])
     upper_wick = df_feat['high'] - df_feat[['close', 'open']].max(axis=1)
@@ -460,6 +464,11 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df_feat['total_wick'] = upper_wick + lower_wick
     df_feat['wick_body_ratio'] = df_feat['total_wick'] / (body + 1e-8)
+
+    # Additional candle features for compatibility
+    df_feat['body_pct'] = body / df_feat['close'] * 100
+    df_feat['upper_wick_pct'] = upper_wick / df_feat['close'] * 100
+    df_feat['lower_wick_pct'] = lower_wick / df_feat['close'] * 100
 
     is_green = (df_feat['close'] > df_feat['open']).astype(int)
     is_red = (df_feat['close'] < df_feat['open']).astype(int)
@@ -482,13 +491,26 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['pressure_delta'] = df_feat['buy_pressure_ma'] - df_feat['sell_pressure_ma']
     df_feat['pressure_momentum'] = df_feat['pressure_delta'].diff(5)
 
+    # Aliases for compatibility
+    df_feat['buy_pressure'] = df_feat['buy_pressure_ma']
+    df_feat['sell_pressure'] = df_feat['sell_pressure_ma']
+
     df_feat['order_imbalance'] = (df_feat['taker_buy_ratio'] - df_feat['taker_sell_ratio']) * df_feat['volume']
     df_feat['imbalance_ma'] = df_feat['order_imbalance'].rolling(20).mean()
 
     # === PRICE VS SMA RATIOS ===
+    sma7 = df_feat['close'].rolling(7).mean()
+    sma14 = df_feat['close'].rolling(14).mean()
+    sma21 = df_feat['close'].rolling(21).mean()
+    sma50 = df_feat['close'].rolling(50).mean()
+
     for period in [7, 14, 21, 50]:
         sma = df_feat['close'].rolling(period).mean()
         df_feat[f'price_sma_{period}_ratio'] = (df_feat['close'] - sma) / sma * 100
+
+    # Additional price vs MA features for compatibility
+    df_feat['price_vs_sma7'] = (df_feat['close'] - sma7) / sma7 * 100
+    df_feat['price_vs_sma21'] = (df_feat['close'] - sma21) / sma21 * 100
 
     # === EMA CROSSES ===
     ema7 = df_feat['close'].ewm(span=7, adjust=False).mean()
@@ -500,6 +522,11 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['ema7_above_ema14'] = (ema7 > ema14).astype(int)
     df_feat['ema14_above_ema21'] = (ema14 > ema21).astype(int)
     df_feat['ema21_above_ema50'] = (ema21 > ema50).astype(int)
+
+    # Additional EMA/SMA crosses for compatibility
+    df_feat['sma7_above_sma21'] = (sma7 > sma21).astype(int)
+    df_feat['ema7_above_ema21'] = (ema7 > ema21).astype(int)
+    df_feat['price_vs_ema14'] = (df_feat['close'] - ema14) / ema14 * 100
 
     df_feat['golden_cross'] = ((ema50 > ema200) & (ema50.shift(1) <= ema200.shift(1))).astype(int)
     df_feat['death_cross'] = ((ema50 < ema200) & (ema50.shift(1) >= ema200.shift(1))).astype(int)
@@ -533,6 +560,7 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['rsi_extreme_oversold'] = (rsi < 20).astype(int)
     df_feat['rsi_extreme_overbought'] = (rsi > 80).astype(int)
     df_feat['rsi_mid'] = ((rsi >= 40) & (rsi <= 60)).astype(int)
+    df_feat['rsi_neutral'] = ((rsi >= 40) & (rsi <= 60)).astype(int)  # Alias for compatibility
 
     # === SLOPE FEATURES ===
     def calculate_slope(series, window=5):
@@ -590,7 +618,7 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['volume_increasing_trend'] = (df_feat['volume_slope'] > 0).astype(int)
 
     # === MOMENTUM FEATURES ===
-    for period in [3, 7, 14]:
+    for period in [3, 5, 7, 8, 13, 14, 21]:
         df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
 
     df_feat['momentum_accel'] = df_feat['momentum_7'].diff(3)
