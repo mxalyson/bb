@@ -57,59 +57,25 @@ print()
 
 
 def download_btc_data(days=180):
-    """Download real BTC data from Bybit."""
+    """Download real BTC data from Bybit using pybit."""
     print(f"📥 Downloading {days} days of real BTC data from Bybit...")
 
     try:
-        # Try to import from bot's core module
-        import sys
-        import os
+        from pybit.unified_trading import HTTP
 
-        # Add bot directory to path
-        bot_dir = Path(__file__).parent
-        if str(bot_dir) not in sys.path:
-            sys.path.insert(0, str(bot_dir))
+        session = HTTP(testnet=False)
 
-        from data import DataManager
-        from rest_client import RestClient
+        # Calculate timestamps
+        end_time = int(datetime.now().timestamp() * 1000)
+        start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-        rest = RestClient()
-        data_mgr = DataManager(rest)
+        all_data = []
+        current_end = end_time
 
-        # Download data
-        df = data_mgr.download_historical_data(
-            symbol='BTCUSDT',
-            interval='15',
-            days=days
-        )
+        print(f"   Downloading in batches...")
 
-        print(f"   ✅ Downloaded {len(df):,} candles")
-        print(f"   📊 Date range: {df.index[0]} to {df.index[-1]}")
-        print(f"   💰 Price range: ${df['close'].min():,.0f} - ${df['close'].max():,.0f}")
-        print()
-
-        return df
-
-    except ImportError as e:
-        print(f"   ⚠️  Cannot import bot modules: {e}")
-        print(f"   📥 Trying alternative download method...")
-
-        try:
-            # Alternative: use pybit directly
-            from pybit.unified_trading import HTTP
-
-            session = HTTP(testnet=False)
-
-            # Calculate timestamps
-            end_time = int(datetime.now().timestamp() * 1000)
-            start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-
-            all_data = []
-            current_end = end_time
-
-            print(f"   Downloading in batches...")
-
-            while current_end > start_time:
+        while current_end > start_time:
+            try:
                 response = session.get_kline(
                     category="linear",
                     symbol="BTCUSDT",
@@ -119,7 +85,7 @@ def download_btc_data(days=180):
                 )
 
                 if response['retCode'] != 0:
-                    print(f"   ❌ API Error: {response['retMsg']}")
+                    print(f"\n   ❌ API Error: {response['retMsg']}")
                     break
 
                 data = response['result']['list']
@@ -137,39 +103,49 @@ def download_btc_data(days=180):
                 if len(all_data) >= days * 96:  # 96 candles per day (15min)
                     break
 
-            print(f"\n   ✅ Downloaded {len(all_data):,} candles")
+            except Exception as e:
+                print(f"\n   ⚠️  Batch download error: {e}")
+                print(f"   Retrying...")
+                import time
+                time.sleep(1)
+                continue
 
-            # Convert to DataFrame
-            df = pd.DataFrame(all_data, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-
-            # Convert types
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-
-            # Set index and sort
-            df.set_index('timestamp', inplace=True)
-            df.sort_index(inplace=True)
-            df = df[['open', 'high', 'low', 'close', 'volume']]
-
-            print(f"   📊 Date range: {df.index[0]} to {df.index[-1]}")
-            print(f"   💰 Price range: ${df['close'].min():,.0f} - ${df['close'].max():,.0f}")
-            print()
-
-            return df
-
-        except Exception as e2:
-            print(f"   ❌ Alternative download failed: {e2}")
-            print()
-            print("   💡 Solutions:")
-            print("      1. Install pybit: pip install pybit")
-            print("      2. Or run from bot directory where core/ exists")
+        if not all_data:
+            print(f"\n   ❌ No data downloaded")
             return None
 
+        print(f"\n   ✅ Downloaded {len(all_data):,} candles")
+
+        # Convert to DataFrame
+        df = pd.DataFrame(all_data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+        ])
+
+        # Convert types
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+
+        # Set index and sort
+        df.set_index('timestamp', inplace=True)
+        df.sort_index(inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+
+        print(f"   📊 Date range: {df.index[0]} to {df.index[-1]}")
+        print(f"   💰 Price range: ${df['close'].min():,.0f} - ${df['close'].max():,.0f}")
+        print()
+
+        return df
+
+    except ImportError:
+        print(f"\n   ❌ pybit not installed")
+        print(f"   💡 Install it with: pip install pybit")
+        return None
+
     except Exception as e:
-        print(f"   ❌ Error: {e}")
+        print(f"\n   ❌ Error downloading data: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
