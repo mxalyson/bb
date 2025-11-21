@@ -15,8 +15,10 @@ import logging
 import pickle
 import time
 import requests
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+from pathlib import Path as PathLib
 import os
 from dotenv import load_dotenv
 
@@ -488,6 +490,12 @@ class LiveTradingBot:
         self.capital = self.initial_capital
         self.last_price: Optional[float] = None
 
+        # State persistence file
+        self.state_file = PathLib('storage/bot_state.json')
+
+        # Load previous state (for cooldown persistence)
+        self._load_state()
+
         logger.info("=" * 80)
         logger.info("🤖 LIVE TRADING BOT - SNIPER MODE")
         logger.info("=" * 80)
@@ -519,6 +527,45 @@ class LiveTradingBot:
             f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}\n"
             f"Network: {network}"
         )
+
+    def _load_state(self):
+        """Load bot state from file to persist cooldown across restarts."""
+        try:
+            if self.state_file.exists():
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+
+                # Load last_trade_time if exists
+                if 'last_trade_time' in state and state['last_trade_time']:
+                    self.last_trade_time = datetime.fromisoformat(state['last_trade_time'])
+
+                    # Check if cooldown is still active
+                    if self.last_trade_time:
+                        time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
+                        if time_since_last < self.trade_cooldown:
+                            remaining = self.trade_cooldown - time_since_last
+                            logger.info(f"⏰ Cooldown ativo do trade anterior: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
+                        else:
+                            logger.info(f"✅ Cooldown do trade anterior expirou")
+                            self.last_trade_time = None
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao carregar estado: {e}")
+
+    def _save_state(self):
+        """Save bot state to file for persistence."""
+        try:
+            # Ensure storage directory exists
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+            state = {
+                'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
+                'updated_at': datetime.now().isoformat()
+            }
+
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar estado: {e}")
 
     def get_current_data(self) -> pd.DataFrame:
         """Download latest data and build features."""
@@ -962,6 +1009,9 @@ class LiveTradingBot:
         # Clear position
         self.position = None
         self.last_trade_time = datetime.now()
+
+        # Save state to persist cooldown across restarts
+        self._save_state()
 
     def recover_open_positions(self):
         """
