@@ -490,8 +490,9 @@ class LiveTradingBot:
         self.capital = self.initial_capital
         self.last_price: Optional[float] = None
 
-        # State persistence file
-        self.state_file = PathLib('storage/bot_state.json')
+        # State persistence file (unique per symbol)
+        symbol_clean = self.symbol.replace('USDT', '').lower()
+        self.state_file = PathLib(f'storage/bot_state_{symbol_clean}.json')
 
         # Load previous state (for cooldown persistence)
         self._load_state()
