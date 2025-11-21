@@ -438,6 +438,221 @@ def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
     return df_features
 
 
+def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create ALL 87 features for ultra_scalper model.
+
+    Advanced features including:
+    - Order flow (taker buy/sell, pressure, imbalance)
+    - Pattern detection (streaks, divergences, higher high/lower low)
+    - Session detection (Asian, London, US, weekend)
+    - Advanced momentum and volatility
+    - Cross detection, microstructure
+    """
+    df_feat = df.copy()
+
+    logger.info("   Creating ultra_scalper features...")
+
+    # === CANDLE FEATURES ===
+    body = abs(df_feat['close'] - df_feat['open'])
+    upper_wick = df_feat['high'] - df_feat[['close', 'open']].max(axis=1)
+    lower_wick = df_feat[['close', 'open']].min(axis=1) - df_feat['low']
+
+    df_feat['total_wick'] = upper_wick + lower_wick
+    df_feat['wick_body_ratio'] = df_feat['total_wick'] / (body + 1e-8)
+
+    is_green = (df_feat['close'] > df_feat['open']).astype(int)
+    is_red = (df_feat['close'] < df_feat['open']).astype(int)
+
+    df_feat['green_streak'] = (is_green * (is_green.groupby((is_green != is_green.shift()).cumsum()).cumcount() + 1))
+    df_feat['red_streak'] = (is_red * (is_red.groupby((is_red != is_red.shift()).cumsum()).cumcount() + 1))
+
+    hl_range = df_feat['high'] - df_feat['low']
+    hl_range_ma = hl_range.rolling(20).mean()
+    df_feat['large_candle'] = (hl_range > hl_range_ma * 1.5).astype(int)
+
+    # === ORDER FLOW (simulated) ===
+    close_position_in_candle = (df_feat['close'] - df_feat['low']) / (df_feat['high'] - df_feat['low'] + 1e-8)
+
+    df_feat['taker_buy_ratio'] = close_position_in_candle
+    df_feat['taker_sell_ratio'] = 1 - close_position_in_candle
+
+    df_feat['buy_pressure_ma'] = df_feat['taker_buy_ratio'].rolling(20).mean()
+    df_feat['sell_pressure_ma'] = df_feat['taker_sell_ratio'].rolling(20).mean()
+    df_feat['pressure_delta'] = df_feat['buy_pressure_ma'] - df_feat['sell_pressure_ma']
+    df_feat['pressure_momentum'] = df_feat['pressure_delta'].diff(5)
+
+    df_feat['order_imbalance'] = (df_feat['taker_buy_ratio'] - df_feat['taker_sell_ratio']) * df_feat['volume']
+    df_feat['imbalance_ma'] = df_feat['order_imbalance'].rolling(20).mean()
+
+    # === PRICE VS SMA RATIOS ===
+    for period in [7, 14, 21, 50]:
+        sma = df_feat['close'].rolling(period).mean()
+        df_feat[f'price_sma_{period}_ratio'] = (df_feat['close'] - sma) / sma * 100
+
+    # === EMA CROSSES ===
+    ema7 = df_feat['close'].ewm(span=7, adjust=False).mean()
+    ema14 = df_feat['close'].ewm(span=14, adjust=False).mean()
+    ema21 = df_feat['close'].ewm(span=21, adjust=False).mean()
+    ema50 = df_feat['close'].ewm(span=50, adjust=False).mean()
+    ema200 = df_feat['close'].ewm(span=200, adjust=False).mean()
+
+    df_feat['ema7_above_ema14'] = (ema7 > ema14).astype(int)
+    df_feat['ema14_above_ema21'] = (ema14 > ema21).astype(int)
+    df_feat['ema21_above_ema50'] = (ema21 > ema50).astype(int)
+
+    df_feat['golden_cross'] = ((ema50 > ema200) & (ema50.shift(1) <= ema200.shift(1))).astype(int)
+    df_feat['death_cross'] = ((ema50 < ema200) & (ema50.shift(1) >= ema200.shift(1))).astype(int)
+
+    # === ATR AND VOLATILITY ===
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = abs(df_feat['low'] - df_feat['close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(14).mean()
+
+    df_feat['atr_pct'] = atr / df_feat['close'] * 100
+
+    returns = df_feat['close'].pct_change()
+    df_feat['volatility_7'] = returns.rolling(7).std() * 100
+    df_feat['volatility_21'] = returns.rolling(21).std() * 100
+
+    df_feat['volatility_ratio'] = df_feat['volatility_7'] / (df_feat['volatility_21'] + 1e-8)
+
+    vol_median = df_feat['volatility_21'].rolling(50).median()
+    df_feat['high_volatility'] = (df_feat['volatility_21'] > vol_median * 1.5).astype(int)
+    df_feat['low_volatility'] = (df_feat['volatility_21'] < vol_median * 0.7).astype(int)
+
+    # === RSI FEATURES ===
+    delta = df_feat['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
+    rs = gain / (loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+
+    df_feat['rsi_extreme_oversold'] = (rsi < 20).astype(int)
+    df_feat['rsi_extreme_overbought'] = (rsi > 80).astype(int)
+    df_feat['rsi_mid'] = ((rsi >= 40) & (rsi <= 60)).astype(int)
+
+    # === SLOPE FEATURES ===
+    def calculate_slope(series, window=5):
+        slopes = []
+        for i in range(len(series)):
+            if i < window:
+                slopes.append(0)
+            else:
+                y = series.iloc[i-window:i].values
+                x = np.arange(window)
+                if len(y) == window:
+                    slope = np.polyfit(x, y, 1)[0]
+                    slopes.append(slope)
+                else:
+                    slopes.append(0)
+        return pd.Series(slopes, index=series.index)
+
+    df_feat['price_slope'] = calculate_slope(df_feat['close'], window=5)
+    df_feat['rsi_slope'] = calculate_slope(rsi, window=5)
+
+    # === DIVERGENCE DETECTION ===
+    price_higher = df_feat['close'] > df_feat['close'].shift(5)
+    rsi_lower = rsi < rsi.shift(5)
+    price_lower = df_feat['close'] < df_feat['close'].shift(5)
+    rsi_higher = rsi > rsi.shift(5)
+
+    df_feat['bullish_divergence'] = (price_lower & rsi_higher).astype(int)
+    df_feat['bearish_divergence'] = (price_higher & rsi_lower).astype(int)
+
+    # === MACD FEATURES ===
+    ema12 = df_feat['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_feat['close'].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    macd_hist = macd - macd_signal
+
+    df_feat['macd_hist_increasing'] = (macd_hist > macd_hist.shift(1)).astype(int)
+
+    # === BOLLINGER BANDS ===
+    sma20 = df_feat['close'].rolling(20).mean()
+    std20 = df_feat['close'].rolling(20).std()
+    bb_upper = sma20 + (2 * std20)
+    bb_lower = sma20 - (2 * std20)
+
+    df_feat['bb_upper_breakout'] = (df_feat['close'] > bb_upper).astype(int)
+    df_feat['bb_lower_breakout'] = (df_feat['close'] < bb_lower).astype(int)
+
+    # === VOLUME FEATURES ===
+    df_feat['volume_sma_20'] = df_feat['volume'].rolling(20).mean()
+
+    vol_median = df_feat['volume'].rolling(50).median()
+    df_feat['high_volume'] = (df_feat['volume'] > vol_median * 1.5).astype(int)
+
+    df_feat['volume_slope'] = calculate_slope(df_feat['volume'], window=5)
+    df_feat['volume_increasing_trend'] = (df_feat['volume_slope'] > 0).astype(int)
+
+    # === MOMENTUM FEATURES ===
+    for period in [3, 7, 14]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    df_feat['momentum_accel'] = df_feat['momentum_7'].diff(3)
+
+    # === PRICE POSITION ===
+    for period in [14, 50]:
+        high_period = df_feat['high'].rolling(period).max()
+        low_period = df_feat['low'].rolling(period).min()
+        df_feat[f'price_position_{period}'] = (df_feat['close'] - low_period) / (high_period - low_period + 1e-8)
+
+    # === SWING POINTS ===
+    df_feat['higher_high'] = (df_feat['high'] > df_feat['high'].shift(1)).astype(int)
+    df_feat['lower_low'] = (df_feat['low'] < df_feat['low'].shift(1)).astype(int)
+
+    df_feat['hh_count'] = df_feat['higher_high'].rolling(10).sum()
+    df_feat['ll_count'] = df_feat['lower_low'].rolling(10).sum()
+
+    # === TREND STRENGTH ===
+    plus_dm = df_feat['high'].diff()
+    minus_dm = -df_feat['low'].diff()
+
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+
+    tr_smooth = true_range.rolling(14).mean()
+    plus_di = (plus_dm.rolling(14).mean() / (tr_smooth + 1e-10)) * 100
+    minus_di = (minus_dm.rolling(14).mean() / (tr_smooth + 1e-10)) * 100
+
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+    adx = dx.rolling(14).mean()
+
+    df_feat['trend_strength'] = adx
+
+    # === SESSION/TIME FEATURES ===
+    if isinstance(df_feat.index, pd.DatetimeIndex):
+        df_feat['hour'] = df_feat.index.hour
+        df_feat['day_of_week'] = df_feat.index.dayofweek
+
+        df_feat['asian_session'] = ((df_feat['hour'] >= 0) & (df_feat['hour'] < 9)).astype(int)
+        df_feat['london_session'] = ((df_feat['hour'] >= 7) & (df_feat['hour'] < 16)).astype(int)
+        df_feat['us_session'] = ((df_feat['hour'] >= 13) & (df_feat['hour'] < 22)).astype(int)
+        df_feat['weekend'] = (df_feat['day_of_week'] >= 5).astype(int)
+    else:
+        df_feat['hour'] = 12
+        df_feat['day_of_week'] = 2
+        df_feat['asian_session'] = 0
+        df_feat['london_session'] = 1
+        df_feat['us_session'] = 0
+        df_feat['weekend'] = 0
+
+    # === SPREAD FEATURES ===
+    df_feat['spread_proxy'] = (df_feat['high'] - df_feat['low']) / df_feat['close'] * 100
+    df_feat['spread_ma'] = df_feat['spread_proxy'].rolling(20).mean()
+
+    # Fill NaN
+    df_feat = df_feat.fillna(method='ffill').fillna(method='bfill').fillna(0)
+
+    logger.info(f"   ✅ Ultra scalper features created")
+
+    return df_feat
+
+
 class StrategyValidator:
     """Valida a estratégia com diferentes configurações."""
 
@@ -461,9 +676,94 @@ class StrategyValidator:
 
         # Bybit trading fees (taker fee for market orders)
         self.trading_fee = config.get('trading_fee', 0.00055)  # 0.055% taker fee
-    
+
+        # Detect model type based on features
+        self.model_type = self._detect_model_type()
+        logger.info(f"   🎯 Detected model type: {self.model_type}")
+
+    def _detect_model_type(self) -> str:
+        """Detect model type based on required features."""
+        features_set = set(self.feature_names)
+
+        # Ultra Scalper signatures
+        ultra_scalper_features = {
+            'total_wick', 'wick_body_ratio', 'green_streak', 'taker_buy_ratio',
+            'order_imbalance', 'asian_session', 'spread_proxy'
+        }
+
+        # V2 Advanced signatures
+        v2_features = {
+            'returns_kurt_50', 'rsi_5', 'bb_width_50', 'order_flow_imbalance',
+            'taker_buy_sell_ratio', 'price_momentum_3'
+        }
+
+        # V1 Advanced signatures
+        v1_features = {
+            'momentum_3', 'momentum_5', 'volume_ratio_3', 'swing_high', 'swing_low'
+        }
+
+        # Classical signatures
+        classical_features = {
+            'roc_5', 'roc_10', 'roc_20', 'roc_30', 'stoch_rsi'
+        }
+
+        # Check for ultra scalper
+        if len(ultra_scalper_features & features_set) >= 3:
+            return 'Ultra Scalper'
+
+        # Check for V2
+        if len(v2_features & features_set) >= 2:
+            return 'V2 Advanced'
+
+        # Check for V1
+        if len(v1_features & features_set) >= 2:
+            return 'V1 Advanced'
+
+        # Check for Classical
+        if len(classical_features & features_set) >= 2:
+            return 'Classical'
+
+        return 'Unknown'
+
+    def _add_missing_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add missing features based on model type."""
+        missing = [f for f in self.feature_names if f not in df.columns]
+
+        if not missing:
+            return df
+
+        logger.info(f"   ⚠️  Missing {len(missing)} features, creating them...")
+
+        # Create features based on model type
+        if self.model_type == 'Ultra Scalper':
+            df = create_ultra_scalper_features(df)
+        elif self.model_type == 'V2 Advanced':
+            df = create_advanced_features_v2(df)
+        elif self.model_type == 'V1 Advanced':
+            df = create_advanced_features(df)
+        elif self.model_type == 'Classical':
+            df = create_classical_features(df)
+        else:
+            logger.warning(f"   ⚠️  Unknown model type, trying all feature sets...")
+            # Try creating all features
+            df = create_classical_features(df)
+            df = create_advanced_features(df)
+            df = create_advanced_features_v2(df)
+            df = create_ultra_scalper_features(df)
+
+        # Check if all features are now present
+        still_missing = [f for f in self.feature_names if f not in df.columns]
+        if still_missing:
+            logger.error(f"   ❌ Still missing {len(still_missing)} features: {still_missing[:10]}")
+            raise KeyError(f"Missing features after creation: {still_missing}")
+
+        return df
+
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
+
+        # Add missing features if needed
+        df = self._add_missing_features(df)
 
         # Get ML predictions
         X = df[self.feature_names].fillna(0)
