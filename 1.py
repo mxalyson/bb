@@ -559,9 +559,7 @@ class StrategyValidator:
             for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
                 reason_display = {
                     'stop_loss': '🛑 Stop Loss',
-                    'take_profit_1': '🎯 TP1',
-                    'take_profit_2': '🎯 TP2',
-                    'take_profit_3': '🎯 TP3',
+                    'take_profit_1': '🎯 Take Profit',
                     'time_exit': '⏰ Time Exit',
                     'end_of_data': '🏁 End of Data'
                 }.get(reason, reason)
@@ -596,14 +594,10 @@ class StrategyValidator:
 
         if direction == 'long':
             sl = price - (atr * 2.0)
-            tp1 = price + (atr * 1.0)
-            tp2 = price + (atr * 2.0)
-            tp3 = price + (atr * 3.0)
+            tp1 = price + (atr * 1.0)  # Apenas TP1
         else:
             sl = price + (atr * 2.0)
-            tp1 = price - (atr * 1.0)
-            tp2 = price - (atr * 2.0)
-            tp3 = price - (atr * 3.0)
+            tp1 = price - (atr * 1.0)  # Apenas TP1
 
         sl_dist = abs((sl - price) / price)
         risk_amt = capital * self.risk_per_trade
@@ -615,7 +609,7 @@ class StrategyValidator:
             direction_emoji = "🟢" if direction == 'long' else "🔴"
             logger.info(f"{direction_emoji} ENTRY #{idx}: {direction.upper()} @ ${price:,.2f}")
             logger.info(f"   Confidence: {current['ml_confidence']:.1%} | Size: ${size:,.2f} | Capital: ${capital:,.2f}")
-            logger.info(f"   SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%) | TP1: ${tp1:,.2f} | TP2: ${tp2:,.2f} | TP3: ${tp3:,.2f}")
+            logger.info(f"   SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%) | TP: ${tp1:,.2f} ({abs((tp1-price)/price)*100:.1f}%)")
 
         return {
             'entry_idx': idx,
@@ -625,8 +619,6 @@ class StrategyValidator:
             'size': size,
             'stop_loss': sl,
             'tp1': tp1,
-            'tp2': tp2,
-            'tp3': tp3,
             'ml_confidence': current['ml_confidence']
         }
     
@@ -634,30 +626,22 @@ class StrategyValidator:
         high = current['high']
         low = current['low']
         direction = position['direction']
-        
+
         if direction == 'long':
             if low <= position['stop_loss']:
                 return 'stop_loss'
-            if high >= position['tp3']:
-                return 'take_profit_3'
-            if high >= position['tp2']:
-                return 'take_profit_2'
             if high >= position['tp1']:
                 return 'take_profit_1'
         else:
             if high >= position['stop_loss']:
                 return 'stop_loss'
-            if low <= position['tp3']:
-                return 'take_profit_3'
-            if low <= position['tp2']:
-                return 'take_profit_2'
             if low <= position['tp1']:
                 return 'take_profit_1'
-        
+
         # Time exit (48h)
         if idx - position['entry_idx'] > 192:
             return 'time_exit'
-        
+
         return None
     
     def _close_trade(self, position, current, reason):
@@ -665,10 +649,6 @@ class StrategyValidator:
             exit_price = position['stop_loss']
         elif reason == 'take_profit_1':
             exit_price = position['tp1']
-        elif reason == 'take_profit_2':
-            exit_price = position['tp2']
-        elif reason == 'take_profit_3':
-            exit_price = position['tp3']
         else:
             exit_price = current['close']
 
@@ -690,9 +670,7 @@ class StrategyValidator:
             # Reason emoji
             reason_map = {
                 'stop_loss': '🛑 STOP LOSS',
-                'take_profit_1': '🎯 TP1',
-                'take_profit_2': '🎯 TP2',
-                'take_profit_3': '🎯 TP3',
+                'take_profit_1': '🎯 TP',
                 'time_exit': '⏰ TIME EXIT',
                 'end_of_data': '🏁 END'
             }
