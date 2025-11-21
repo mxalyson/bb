@@ -1059,6 +1059,28 @@ class StrategyValidator:
         size = risk_amt / sl_dist if sl_dist > 0 else capital * 0.1
         size = min(size, capital * 0.95)
 
+        # ============================================================================
+        # REALISMO: Aplicar mínimo e arredondamento da Bybit (igual ao live_bot.py)
+        # ============================================================================
+        # Bybit exige mínimo de 0.001 BTC e arredondamento em steps de 0.001 BTC
+        min_qty_btc = 0.001
+        qty_step = 0.001
+
+        # Converter size (USD) para quantidade em BTC
+        qty_btc = size / price
+
+        # Forçar mínimo da Bybit
+        qty_btc = max(min_qty_btc, qty_btc)
+
+        # Arredondar para step size (0.001 BTC)
+        qty_btc = round(qty_btc / qty_step) * qty_step
+
+        # Reconverter para USD (mantém compatibilidade com resto do código)
+        size = qty_btc * price
+
+        # Garantir que não ultrapassa 95% do capital
+        size = min(size, capital * 0.95)
+
         # DEBUG: Log trade entry (if verbose)
         if self.verbose_trades:
             direction_emoji = "🟢" if direction == 'long' else "🔴"
