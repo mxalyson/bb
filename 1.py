@@ -1516,8 +1516,8 @@ def main():
     logger.info("🏆 ANÁLISE DE MELHOR CONFIGURAÇÃO")
     logger.info("=" * 80)
     logger.info("")
-    
-    analyze_best_config(results)
+
+    analyze_best_config(results, config, model_path, df_features, args)
 
 
 def print_comparison_table(results, days):
@@ -1544,9 +1544,9 @@ def print_comparison_table(results, days):
             logger.info(f"{r['min_confidence']*100:>5.0f}% | No trades")
 
 
-def analyze_best_config(results):
+def analyze_best_config(results, config, model_path, df_features, args):
     """Analyze and recommend best configuration."""
-    
+
     valid_results = [r for r in results if r.get('total_trades', 0) > 0]
     
     if not valid_results:
