@@ -761,7 +761,7 @@ class LiveTradingBot:
             'symbol': self.symbol,
             'direction': direction,
             'entry_price': actual_entry_price,
-            'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'entry_time': datetime.now(),  # Store as datetime object, not string
             'qty': qty_btc,
             'size': size_usd,
             'stop_loss': sl,
