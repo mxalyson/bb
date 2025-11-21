@@ -458,6 +458,9 @@ class StrategyValidator:
 
         self.initial_capital = config.get('initial_capital', 10000)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
+
+        # Bybit trading fees (taker fee for market orders)
+        self.trading_fee = config.get('trading_fee', 0.00055)  # 0.055% taker fee
     
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
@@ -578,10 +581,14 @@ class StrategyValidator:
             if shorts:
                 logger.info(f"  🔴 Shorts: {len(shorts)} ({len(short_wins)/len(shorts)*100:.1f}% WR)")
 
+            # Calculate total fees paid
+            total_fees_paid = sum(t.get('fees', 0) for t in trades)
+
             logger.info("")
             logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
             logger.info(f"Final Capital: ${capital:,.2f}")
             logger.info(f"Total PnL: ${capital - self.initial_capital:+,.2f} ({(capital/self.initial_capital - 1)*100:+.2f}%)")
+            logger.info(f"Total Fees Paid: ${total_fees_paid:,.2f} (Bybit {self.trading_fee*100:.3f}% taker)")
             logger.info("=" * 80)
             logger.info("")
 
@@ -662,9 +669,18 @@ class StrategyValidator:
 
         pnl_amount = position['size'] * (pnl_pct / 100)
 
+        # Calculate Bybit trading fees (entry + exit)
+        entry_fee = position['size'] * self.trading_fee
+        exit_fee = position['size'] * self.trading_fee
+        total_fees = entry_fee + exit_fee
+
+        # Subtract fees from PnL
+        pnl_amount_after_fees = pnl_amount - total_fees
+        pnl_pct_after_fees = (pnl_amount_after_fees / position['size']) * 100
+
         # DEBUG: Log trade exit (if verbose)
         if self.verbose_trades:
-            is_win = pnl_amount > 0
+            is_win = pnl_amount_after_fees > 0
             result_emoji = "✅" if is_win else "❌"
 
             # Reason emoji
@@ -679,7 +695,8 @@ class StrategyValidator:
             direction_emoji = "🟢" if direction == 'long' else "🔴"
             logger.info(f"{result_emoji} EXIT {direction_emoji} {direction.upper()}: {reason_display}")
             logger.info(f"   Entry: ${entry:,.2f} → Exit: ${exit_price:,.2f}")
-            logger.info(f"   PnL: {pnl_pct:+.2f}% (${pnl_amount:+,.2f}) | Duration: {position['entry_time']} → {current.name}")
+            logger.info(f"   PnL: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f}) | Fees: ${total_fees:.2f}")
+            logger.info(f"   Duration: {position['entry_time']} → {current.name}")
             logger.info("")
 
         return {
@@ -689,8 +706,9 @@ class StrategyValidator:
             'entry_price': entry,
             'exit_price': exit_price,
             'size': position['size'],
-            'pnl_pct': pnl_pct,
-            'pnl_amount': pnl_amount,
+            'pnl_pct': pnl_pct_after_fees,
+            'pnl_amount': pnl_amount_after_fees,
+            'fees': total_fees,
             'reason': reason,
             'ml_confidence': position['ml_confidence']
         }
