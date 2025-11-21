@@ -31,6 +31,28 @@ from imblearn.over_sampling import SMOTE
 import warnings
 warnings.filterwarnings('ignore')
 
+
+# ============================================================================
+# MODEL WRAPPER CLASS (MUST BE AT MODULE LEVEL FOR PICKLING)
+# ============================================================================
+
+class ModelWrapper:
+    """Wrapper for ensemble model compatible with 1.py"""
+    def __init__(self, models_list, model_weights, model_names, scaler, feature_columns,
+                 long_threshold, short_threshold):
+        self.models_list = models_list
+        self.model_weights = model_weights
+        self.model_names = model_names
+        self.scaler = scaler
+        self.feature_columns = feature_columns
+        self.has_dl = False
+        self.long_threshold = long_threshold
+        self.short_threshold = short_threshold
+        self.lookback = 100
+        self.version = "1.0_balanced_ensemble"
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 print("=" * 80)
 print("🚀 TRAINING HIGH-QUALITY SCALPING MODEL")
 print("=" * 80)
@@ -290,20 +312,25 @@ def create_all_features(df):
 # 3. CREATE BALANCED LABELS (SCALPING STRATEGY)
 # ============================================================================
 
-def create_scalping_labels(df, atr_multiplier_tp=1.0, atr_multiplier_sl=2.0, forward_bars=48):
+def create_scalping_labels(df, atr_multiplier_tp=1.5, atr_multiplier_sl=2.0, forward_bars=32):
     """
-    Create balanced labels for scalping.
+    Create balanced labels for scalping by comparing long vs short performance.
 
-    Label = 1 (LONG) if TP hit before SL
-    Label = 0 (SHORT) if SL hit before TP or sideways
+    Strategy:
+    - Simulate both LONG and SHORT trades
+    - Calculate PnL for each
+    - Label = 1 if LONG has better PnL
+    - Label = 0 if SHORT has better PnL
 
-    This ensures balanced dataset.
+    This naturally creates 50/50 balance.
     """
 
-    print("🎯 Creating balanced scalping labels...")
+    print("🎯 Creating balanced scalping labels (comparing long vs short PnL)...")
     print(f"   TP: {atr_multiplier_tp}x ATR | SL: {atr_multiplier_sl}x ATR | Horizon: {forward_bars} bars")
 
     labels = []
+    long_wins = 0
+    short_wins = 0
 
     for i in range(len(df)):
         if i >= len(df) - forward_bars:
@@ -317,54 +344,53 @@ def create_scalping_labels(df, atr_multiplier_tp=1.0, atr_multiplier_sl=2.0, for
         price = current['close']
         atr = current['atr']
 
-        # Define TP and SL for long
+        # === SIMULATE LONG TRADE ===
         tp_long = price + (atr * atr_multiplier_tp)
         sl_long = price - (atr * atr_multiplier_sl)
 
-        # Define TP and SL for short
+        long_pnl = 0
+        for j, row in future.iterrows():
+            # Check SL first (conservative)
+            if row['low'] <= sl_long:
+                long_pnl = (sl_long - price) / price  # Negative
+                break
+            # Check TP
+            if row['high'] >= tp_long:
+                long_pnl = (tp_long - price) / price  # Positive
+                break
+
+        # If no TP/SL hit, use final price
+        if long_pnl == 0:
+            final_price = future.iloc[-1]['close']
+            long_pnl = (final_price - price) / price
+
+        # === SIMULATE SHORT TRADE ===
         tp_short = price - (atr * atr_multiplier_tp)
         sl_short = price + (atr * atr_multiplier_sl)
 
-        # Check if long TP hit first
-        long_tp_hit = (future['high'] >= tp_long).any()
-        long_sl_hit = (future['low'] <= sl_long).any()
+        short_pnl = 0
+        for j, row in future.iterrows():
+            # Check SL first (conservative)
+            if row['high'] >= sl_short:
+                short_pnl = (price - sl_short) / price  # Negative
+                break
+            # Check TP
+            if row['low'] <= tp_short:
+                short_pnl = (price - tp_short) / price  # Positive
+                break
 
-        # Check if short TP hit first
-        short_tp_hit = (future['low'] <= tp_short).any()
-        short_sl_hit = (future['high'] >= sl_short).any()
+        # If no TP/SL hit, use final price
+        if short_pnl == 0:
+            final_price = future.iloc[-1]['close']
+            short_pnl = (price - final_price) / price
 
-        # Find which one hit first
-        if long_tp_hit:
-            idx_long_tp = future[future['high'] >= tp_long].index[0]
+        # === COMPARE AND LABEL ===
+        if long_pnl > short_pnl:
+            label = 1  # LONG is better
+            long_wins += 1
         else:
-            idx_long_tp = None
-
-        if long_sl_hit:
-            idx_long_sl = future[future['low'] <= sl_long].index[0]
-        else:
-            idx_long_sl = None
-
-        if short_tp_hit:
-            idx_short_tp = future[future['low'] <= tp_short].index[0]
-        else:
-            idx_short_tp = None
-
-        if short_sl_hit:
-            idx_short_sl = future[future['high'] >= sl_short].index[0]
-        else:
-            idx_short_sl = None
-
-        # Determine label
-        # Priority: if long TP hit before long SL -> LONG (1)
-        #           if short TP hit before short SL -> SHORT (0)
-        #           else -> SIDEWAYS (consider as SHORT for balance)
-
-        label = 0  # Default: SHORT/SIDEWAYS
-
-        if idx_long_tp is not None:
-            if idx_long_sl is None or idx_long_tp < idx_long_sl:
-                # Long TP hit first
-                label = 1
+            label = 0  # SHORT is better
+            short_wins += 1
 
         labels.append(label)
 
@@ -655,21 +681,6 @@ def main():
     # Save model
     print("💾 Saving model...")
 
-    class ModelWrapper:
-        def __init__(self, models_list, model_weights, model_names, scaler, feature_columns,
-                     long_threshold, short_threshold):
-            self.models_list = models_list
-            self.model_weights = model_weights
-            self.model_names = model_names
-            self.scaler = scaler
-            self.feature_columns = feature_columns
-            self.has_dl = False
-            self.long_threshold = long_threshold
-            self.short_threshold = 1 - long_threshold
-            self.lookback = 100
-            self.version = "1.0_balanced_ensemble"
-            self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     wrapper = ModelWrapper(
         models_list=models,
         model_weights=model_weights,
@@ -677,7 +688,7 @@ def main():
         scaler=scaler,
         feature_columns=feature_cols,
         long_threshold=optimal_threshold,
-        short_threshold=1 - optimal_threshold
+        short_threshold=1.0 - optimal_threshold
     )
 
     output_path = Path('storage/models')
