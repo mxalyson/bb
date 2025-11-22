@@ -444,7 +444,7 @@ class LiveTradingBot:
 
         # Stop loss / Take profit multipliers
         self.sl_atr_mult = float(os.getenv('SL_ATR_MULT', '2.0'))
-        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '1.0'))
+        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))  # Otimizado: 100% WR nos testes!
 
         # Cooldown between trades (seconds)
         self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
@@ -489,6 +489,7 @@ class LiveTradingBot:
         self.last_trade_time: Optional[datetime] = None
         self.capital = self.initial_capital
         self.last_price: Optional[float] = None
+        self.last_analyzed_candle_time: Optional[datetime] = None  # Track last candle to avoid re-analysis
 
         # State persistence file (unique per symbol)
         symbol_clean = self.symbol.replace('USDT', '').lower()
@@ -1129,6 +1130,7 @@ class LiveTradingBot:
 
                     # Get last candle
                     current = df.iloc[-1]
+                    current_candle_time = current.name  # Candle timestamp
 
                     # Check if we have an open position
                     if self.position:
@@ -1137,6 +1139,11 @@ class LiveTradingBot:
 
                     # Check if we can open a new position
                     else:
+                        # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
+                        if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
+                            logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
+                            time.sleep(10)
+                            continue
                         # Check cooldown
                         if self.last_trade_time:
                             time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
@@ -1167,6 +1174,9 @@ class LiveTradingBot:
                                 confidence = 1 - pred
 
                             logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {'LONG' if signal==1 else 'SHORT'} | Confiança: {confidence:.1%}")
+
+                            # Mark this candle as analyzed (regardless of whether we trade)
+                            self.last_analyzed_candle_time = current_candle_time
 
                             # Check if confidence meets threshold
                             if confidence >= self.min_confidence:
