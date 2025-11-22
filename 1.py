@@ -1530,7 +1530,6 @@ def main():
         for sl in sl_mults:
             for tp in tp_mults:
                 count += 1
-                logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x... ", end="")
 
                 # Create validator with specific ATR settings
                 validator_grid = StrategyValidator(
@@ -1557,7 +1556,7 @@ def main():
                     'dd': stats.get('max_drawdown', 0)
                 })
 
-                logger.info(f"✓ ({stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI)")
+                logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x → {stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
 
     # Display TOP 10 results
     logger.info("")
