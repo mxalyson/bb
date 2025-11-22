@@ -1011,7 +1011,10 @@ class LiveTradingBot:
         logger.info("=" * 80)
         logger.info(f"{direction_emoji} ABRINDO POSIÇÃO {direction.upper()}")
         logger.info("=" * 80)
-        logger.info(f"Preço: ${price:,.2f}")
+        logger.info(f"📍 Baseado no candle: {current_candle.name}")
+        logger.info(f"📍 Close do candle: ${current_candle['close']:,.2f}")
+        logger.info(f"⏰ Executando AGORA: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Preço entrada (estimado): ${price:,.2f}")
         logger.info(f"Confiança: {confidence:.1%}")
         logger.info(f"Qtd: {qty_btc} BTC = ${size_usd:,.2f}")
         logger.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
@@ -1372,11 +1375,23 @@ class LiveTradingBot:
                     # Get current data
                     df = self.get_current_data()
 
+                    # DEBUG: Log últimos candles
+                    logger.info(f"📊 Últimos 3 candles:")
+                    for i in range(-3, 0):
+                        candle = df.iloc[i]
+                        logger.info(f"   [{i}] {candle.name} | Close: ${candle['close']:,.2f}")
+
                     # Get last CLOSED candle (penultimate = último fechado)
                     # iloc[-1] = candle atual (incompleto)
                     # iloc[-2] = último candle fechado ✅
                     current = df.iloc[-2]
                     current_candle_time = current.name  # Candle timestamp
+
+                    # DEBUG: Mostrar horários
+                    now = datetime.now()
+                    logger.info(f"⏰ Sistema: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.info(f"🕐 Candle analisando: {current_candle_time}")
+                    logger.info(f"🕑 Último analisado: {self.last_analyzed_candle_time}")
 
                     # Check if we have an open position
                     if self.position:
