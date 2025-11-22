@@ -1406,35 +1406,39 @@ class LiveTradingBot:
 
                         # Make prediction
                         try:
+                            # Get prediction for ONLY the last closed candle (iloc[-2])
+                            df_single = df.iloc[[-2]].copy()
+
                             predictions = make_prediction(
                                 self.model,
                                 self.model_data,
-                                df,
+                                df_single,
                                 self.feature_names
                             )
 
-                            # Get prediction for current candle
-                            pred = predictions[-1]
+                            # Get prediction
+                            pred = predictions[0]  # Only one prediction
 
-                            # Determine signal
+                            # Calculate confidence (CORRETO - same as 2.py)
+                            ml_confidence = abs(pred - self.optimal_threshold) * 2
+
+                            # Determine signal (same as 2.py)
                             if pred >= self.optimal_threshold:
                                 signal = 1  # long
-                                confidence = pred
                             else:
                                 signal = -1  # short
-                                confidence = 1 - pred
 
-                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {'LONG' if signal==1 else 'SHORT'} | Confiança: {confidence:.1%}")
+                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {'LONG' if signal==1 else 'SHORT'} | Confiança: {ml_confidence:.1%}")
 
                             # Mark this candle as analyzed (regardless of whether we trade)
                             self.last_analyzed_candle_time = current_candle_time
 
                             # Check if confidence meets threshold
-                            if confidence >= self.min_confidence:
-                                logger.info(f"✅ Confiança do sinal {confidence:.1%} >= {self.min_confidence:.1%}")
-                                self.open_position(current, signal, confidence)
+                            if ml_confidence >= self.min_confidence:
+                                logger.info(f"✅ Confiança do sinal {ml_confidence:.1%} >= {self.min_confidence:.1%}")
+                                self.open_position(current, signal, ml_confidence)
                             else:
-                                logger.info(f"⏭️  Confiança {confidence:.1%} < {self.min_confidence:.1%} - pulando")
+                                logger.info(f"⏭️  Confiança {ml_confidence:.1%} < {self.min_confidence:.1%} - pulando")
 
                         except Exception as e:
                             logger.error(f"Prediction error: {e}")
