@@ -71,27 +71,19 @@ class RROptimizer:
         self.min_confidence = min_confidence
 
         # Load model with universal unpickler (always use custom to avoid class issues)
-        print(f"🔍 Loading model: {model_path}")
         with open(model_path, 'rb') as f:
             self.model_data = UniversalUnpickler(f).load()
-        print(f"   ✅ Model loaded successfully")
 
         # Extract model and features
         if hasattr(self.model_data, 'feature_columns'):
             self.feature_names = self.model_data.feature_columns
             self.model = self.model_data
-            print(f"   ✅ Found {len(self.feature_names)} features in model")
         elif isinstance(self.model_data, dict):
             self.model = self.model_data.get('model')
             self.feature_names = self.model_data.get('feature_names')
-            print(f"   ✅ Loaded dict format with {len(self.feature_names)} features")
         else:
             self.model = self.model_data
             self.feature_names = getattr(self.model_data, 'feature_names', None)
-            if self.feature_names:
-                print(f"   ✅ Found {len(self.feature_names)} features")
-            else:
-                print(f"   ⚠️  No feature names found, will try to infer...")
 
         self.initial_capital = config.get('initial_capital', 300)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
@@ -119,8 +111,8 @@ class RROptimizer:
             else:
                 # Fallback: neutral predictions
                 ml_probs = np.array([0.5] * len(X))
-        except Exception as e:
-            print(f"   ⚠️  Prediction failed: {e}, using neutral predictions")
+        except Exception:
+            # Silent fallback to neutral predictions
             ml_probs = np.array([0.5] * len(X))
 
         df['ml_prob_up'] = ml_probs
@@ -373,7 +365,11 @@ def main():
     args = parser.parse_args()
 
     config = load_config('standard')
-    logger = setup_logging('INFO', log_to_file=False)
+
+    # Silence verbose logging, only show critical info
+    import logging as std_logging
+    std_logging.basicConfig(level=std_logging.WARNING)
+    logger = setup_logging('WARNING', log_to_file=False)
 
     print()
     print("=" * 80)
@@ -387,7 +383,7 @@ def main():
     print()
 
     # Download data
-    print("📥 Downloading data...")
+    print("📥 Downloading data...", end=" ", flush=True)
     rest_client = BybitRESTClient(
         api_key=config['bybit_api_key'],
         api_secret=config['bybit_api_secret'],
@@ -398,30 +394,48 @@ def main():
     df = dm.get_data(args.symbol, '15m', args.days, use_cache=False)
 
     if df.empty:
-        print("❌ No data")
+        print("\n❌ No data")
         return
 
-    print(f"✅ Downloaded {len(df):,} candles")
-    print()
+    print(f"✅ {len(df):,} candles")
 
-    # Build features
-    print("🔨 Building features...")
+    # Build features (same as 1.py)
+    print("🔨 Building features...", end=" ", flush=True)
     fs = FeatureStore(config)
     df_features = fs.build_features(df, normalize=False)
 
-    # Add ultra scalper features if needed
+    # Import ultra scalper features from 1.py
     try:
-        from create_ultra_scalper_features import create_ultra_scalper_features
-        df_features = create_ultra_scalper_features(df_features)
-    except:
-        pass
+        # Try to import from 1.py module
+        import importlib.util
+        import logging as std_logging
 
-    print(f"✅ Features ready")
+        # Temporarily silence logging
+        prev_level = std_logging.root.level
+        std_logging.root.setLevel(std_logging.CRITICAL)
+
+        spec = importlib.util.spec_from_file_location("validator_1", "1.py")
+        validator_1 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator_1)
+
+        df_features = validator_1.create_ultra_scalper_features(df_features)
+
+        # Restore logging level
+        std_logging.root.setLevel(prev_level)
+
+        print(f"✅ {len(df_features.columns)} columns ready")
+    except Exception as e:
+        std_logging.root.setLevel(prev_level)
+        print(f"⚠️  Using base features ({len(df_features.columns)} columns)")
+
     print()
 
     # Load model
     model_path = f"storage/models/{args.model}"
+    print(f"🤖 Loading model...", end=" ", flush=True)
     optimizer = RROptimizer(config, model_path, args.confidence)
+    print(f"✅ {len(optimizer.feature_names)} features")
+    print()
 
     # Test configurations
     configs = [
@@ -439,13 +453,16 @@ def main():
         (1.0, 1.0, True),   # 50% no TP1, 50% no TP2 (1.5x)
     ]
 
-    print("🧪 Testing configurations...")
-    print()
+    print(f"🧪 Testing {len(configs)} configurations...", end=" ", flush=True)
 
     results = []
-    for sl, tp, partial in configs:
+    for i, (sl, tp, partial) in enumerate(configs, 1):
+        print(f"{i}", end="." if i < len(configs) else " ", flush=True)
         stats = optimizer.test_configuration(df_features.copy(), sl, tp, partial)
         results.append(stats)
+
+    print("✅")
+    print()
 
     # Print results
     print("=" * 100)
