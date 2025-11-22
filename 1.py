@@ -979,61 +979,7 @@ class StrategyValidator:
             trade = self._close_trade(position, df.iloc[-1], 'end_of_data')
             trades.append(trade)
 
-        # DEBUG: Summary
-        if trades:
-            winning_trades = [t for t in trades if t['pnl_amount'] > 0]
-            losing_trades = [t for t in trades if t['pnl_amount'] <= 0]
-
-            # Count by exit reason
-            reasons = {}
-            for t in trades:
-                reason = t['reason']
-                reasons[reason] = reasons.get(reason, 0) + 1
-
-            logger.info("=" * 80)
-            logger.info("📊 BACKTEST SUMMARY")
-            logger.info("=" * 80)
-            logger.info(f"Total Trades: {len(trades)}")
-            logger.info(f"  ✅ Winners: {len(winning_trades)} ({len(winning_trades)/len(trades)*100:.1f}%)")
-            logger.info(f"  ❌ Losers: {len(losing_trades)} ({len(losing_trades)/len(trades)*100:.1f}%)")
-            logger.info("")
-            logger.info("Exit Reasons:")
-            for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
-                reason_display = {
-                    'stop_loss': '🛑 Stop Loss',
-                    'take_profit_1': '🎯 Take Profit',
-                    'time_exit': '⏰ Time Exit',
-                    'end_of_data': '🏁 End of Data'
-                }.get(reason, reason)
-                logger.info(f"  {reason_display}: {count} ({count/len(trades)*100:.1f}%)")
-
-            # Direction breakdown
-            longs = [t for t in trades if t['direction'] == 'long']
-            shorts = [t for t in trades if t['direction'] == 'short']
-            long_wins = [t for t in longs if t['pnl_amount'] > 0]
-            short_wins = [t for t in shorts if t['pnl_amount'] > 0]
-
-            logger.info("")
-            logger.info("Direction Breakdown:")
-            if longs:
-                logger.info(f"  🟢 Longs: {len(longs)} ({len(long_wins)/len(longs)*100:.1f}% WR)")
-            if shorts:
-                logger.info(f"  🔴 Shorts: {len(shorts)} ({len(short_wins)/len(shorts)*100:.1f}% WR)")
-
-            # Calculate total fees paid
-            total_fees_paid = sum(t.get('fees', 0) for t in trades)
-
-            logger.info("")
-            logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
-            logger.info(f"Final Capital: ${capital:,.2f}")
-            logger.info(f"Total PnL: ${capital - self.initial_capital:+,.2f} ({(capital/self.initial_capital - 1)*100:+.2f}%)")
-            logger.info(f"Total Fees Paid: ${total_fees_paid:,.2f} (Bybit {self.fee_type} {self.trading_fee*100:.3f}%)")
-            logger.info("=" * 80)
-            logger.info("")
-
-            # Print optimization recommendations
-            self._print_optimization_summary(trades, capital)
-
+        # Grid search mode: skip detailed logs
         return trades
     
     def _open_trade(self, current, capital, idx):
@@ -1177,155 +1123,6 @@ class StrategyValidator:
             'ml_confidence': position['ml_confidence']
         }
 
-    def _analyze_by_confidence_ranges(self, trades):
-        """Analyze trades performance by confidence ranges."""
-        if not trades:
-            return []
-
-        # Define confidence ranges (expanded to 90%)
-        ranges = [
-            (0.00, 0.20, "0.00-0.20"),
-            (0.20, 0.30, "0.20-0.30"),
-            (0.30, 0.40, "0.30-0.40"),
-            (0.40, 0.50, "0.40-0.50"),
-            (0.50, 0.60, "0.50-0.60"),
-            (0.60, 0.70, "0.60-0.70"),
-            (0.70, 0.80, "0.70-0.80"),
-            (0.80, 0.90, "0.80-0.90"),
-            (0.90, 1.00, "0.90-1.00")
-        ]
-
-        results = []
-
-        for min_conf, max_conf, label in ranges:
-            range_trades = [t for t in trades if min_conf <= t['ml_confidence'] < max_conf]
-
-            if not range_trades:
-                continue
-
-            winning = [t for t in range_trades if t['pnl_amount'] > 0]
-            total_pnl = sum(t['pnl_amount'] for t in range_trades)
-
-            results.append({
-                'range': label,
-                'min_conf': min_conf,
-                'max_conf': max_conf,
-                'total_trades': len(range_trades),
-                'winners': len(winning),
-                'win_rate': len(winning) / len(range_trades) if range_trades else 0,
-                'total_pnl': total_pnl,
-                'roi_pct': (total_pnl / self.initial_capital) * 100
-            })
-
-        return results
-
-    def _print_optimization_summary(self, all_trades, capital_final):
-        """Print optimization recommendations based on confidence analysis."""
-        if not all_trades:
-            return
-
-        logger.info("=" * 80)
-        logger.info("📊 PERFORMANCE BY CONFIDENCE RANGE")
-        logger.info("=" * 80)
-
-        ranges = self._analyze_by_confidence_ranges(all_trades)
-
-        # Print table
-        for r in ranges:
-            status = ""
-            if r['win_rate'] >= 0.80:
-                status = "✅✅"
-            elif r['win_rate'] >= 0.65:
-                status = "✅"
-            elif r['win_rate'] >= 0.50:
-                status = "⚠️"
-            else:
-                status = "❌"
-
-            logger.info(f"{r['range']:12s} | {r['total_trades']:3d} trades | WR: {r['win_rate']*100:5.1f}% | ROI: {r['roi_pct']:+6.2f}% {status}")
-
-        logger.info("")
-
-        # Find optimal threshold
-        best_threshold = 0.0
-        best_roi = float('-inf')
-        best_wr = 0.0
-
-        for threshold in [0.0, 0.20, 0.30, 0.40, 0.50, 0.60]:
-            filtered_trades = [t for t in all_trades if t['ml_confidence'] >= threshold]
-
-            if not filtered_trades:
-                continue
-
-            winning = [t for t in filtered_trades if t['pnl_amount'] > 0]
-            total_pnl = sum(t['pnl_amount'] for t in filtered_trades)
-            roi = (total_pnl / self.initial_capital) * 100
-            wr = len(winning) / len(filtered_trades)
-
-            if roi > best_roi:
-                best_roi = roi
-                best_threshold = threshold
-                best_wr = wr
-
-        # Print comparison
-        logger.info("💡 OPTIMIZATION RECOMMENDATIONS")
-        logger.info("=" * 80)
-
-        # Current results (no filter)
-        current_pnl = sum(t['pnl_amount'] for t in all_trades)
-        current_roi = (current_pnl / self.initial_capital) * 100
-        current_wr = len([t for t in all_trades if t['pnl_amount'] > 0]) / len(all_trades)
-
-        logger.info(f"Current Settings (no confidence filter):")
-        logger.info(f"   Total Trades: {len(all_trades)}")
-        logger.info(f"   Win Rate: {current_wr*100:.1f}%")
-        logger.info(f"   ROI: {current_roi:+.2f}%")
-        logger.info("")
-
-        # Optimal settings
-        optimal_trades = [t for t in all_trades if t['ml_confidence'] >= best_threshold]
-        logger.info(f"Recommended Settings (min_confidence >= {best_threshold:.2f}):")
-        logger.info(f"   Total Trades: {len(optimal_trades)}")
-        logger.info(f"   Win Rate: {best_wr*100:.1f}%")
-        logger.info(f"   ROI: {best_roi:+.2f}%")
-        logger.info("")
-
-        # Calculate impact
-        roi_improvement = best_roi - current_roi
-        wr_improvement = (best_wr - current_wr) * 100
-        trades_reduction = len(all_trades) - len(optimal_trades)
-
-        logger.info("Impact of Optimization:")
-        logger.info(f"   ✅ ROI improvement: {roi_improvement:+.2f}%")
-        logger.info(f"   ✅ WR improvement: {wr_improvement:+.1f}pp")
-        logger.info(f"   📉 Trades reduced: {trades_reduction} ({trades_reduction/len(all_trades)*100:.1f}%)")
-        logger.info("")
-
-        # Specific recommendations
-        logger.info("Actionable Recommendations:")
-
-        if best_threshold >= 0.30:
-            logger.info(f"   ✅ Use min_confidence >= {best_threshold:.2f}")
-        else:
-            logger.info(f"   ⚠️  Model works at all confidence levels (threshold: {best_threshold:.2f})")
-
-        if self.fee_type == 'taker':
-            # Estimate maker fee impact
-            maker_fee = 0.0002
-            taker_fee = self.trading_fee
-            fee_savings_per_trade = (taker_fee - maker_fee) * 2  # entry + exit
-            total_fee_savings = fee_savings_per_trade * len(optimal_trades) * self.initial_capital * self.risk_per_trade / 0.01
-
-            logger.info(f"   ✅ Switch to MAKER orders (estimated savings: ${total_fee_savings:.2f})")
-
-        # Risk suggestions
-        if current_wr >= 0.80:
-            logger.info(f"   📈 Consider increasing risk_per_trade to 1.0-1.25% (current: {self.risk_per_trade*100:.2f}%)")
-        elif current_wr < 0.60:
-            logger.info(f"   📉 Consider reducing risk_per_trade to 0.5% (current: {self.risk_per_trade*100:.2f}%)")
-
-        logger.info("=" * 80)
-        logger.info("")
 
     def _calculate_stats(self, trades, df, min_confidence):
         if not trades:
@@ -1363,13 +1160,18 @@ class StrategyValidator:
         # Direction stats
         longs = df_trades[df_trades['direction'] == 'long']
         shorts = df_trades[df_trades['direction'] == 'short']
-        
-        long_wr = (len(longs[longs['pnl_amount'] > 0]) / len(longs) * 100) if len(longs) > 0 else 0
-        short_wr = (len(shorts[shorts['pnl_amount'] > 0]) / len(shorts) * 100) if len(shorts) > 0 else 0
-        
+
+        long_win = len(longs[longs['pnl_amount'] > 0]) if len(longs) > 0 else 0
+        long_loss = len(longs[longs['pnl_amount'] <= 0]) if len(longs) > 0 else 0
+        short_win = len(shorts[shorts['pnl_amount'] > 0]) if len(shorts) > 0 else 0
+        short_loss = len(shorts[shorts['pnl_amount'] <= 0]) if len(shorts) > 0 else 0
+
+        long_wr = (long_win / len(longs) * 100) if len(longs) > 0 else 0
+        short_wr = (short_win / len(shorts) * 100) if len(shorts) > 0 else 0
+
         # Confidence stats
         avg_confidence = df_trades['ml_confidence'].mean()
-        
+
         return {
             'min_confidence': min_confidence,
             'total_trades': total,
@@ -1387,6 +1189,10 @@ class StrategyValidator:
             'avg_ml_confidence': avg_confidence,
             'long_trades': len(longs),
             'short_trades': len(shorts),
+            'long_win': long_win,
+            'long_loss': long_loss,
+            'short_win': short_win,
+            'short_loss': short_loss,
             'long_wr': long_wr,
             'short_wr': short_wr,
         }
@@ -1506,7 +1312,7 @@ def main():
     # GRID SEARCH COMPLETO: Confiança x SL x TP
     # ========================================================================
     logger.info("=" * 80)
-    logger.info("🔥 GRID SEARCH COMPLETO - Confiança x SL x TP")
+    logger.info("🔥 GRID SEARCH - Testando todas as combinações de Confiança x SL x TP")
     logger.info("=" * 80)
     logger.info("")
 
@@ -1516,12 +1322,6 @@ def main():
     tp_mults = [0.7, 1.0, 1.2]
 
     total_configs = len(confidence_levels) * len(sl_mults) * len(tp_mults)
-
-    logger.info(f"Testando {total_configs} configurações:")
-    logger.info(f"   Confidências: {[f'{c:.0%}' for c in confidence_levels]}")
-    logger.info(f"   SL: {[f'{s:.1f}x' for s in sl_mults]}")
-    logger.info(f"   TP: {[f'{t:.1f}x' for t in tp_mults]}")
-    logger.info("")
 
     grid_results = []
     count = 0
@@ -1553,38 +1353,46 @@ def main():
                     'roi': stats.get('roi', 0),
                     'sharpe': stats.get('sharpe_ratio', 0),
                     'pf': stats.get('profit_factor', 0),
-                    'dd': stats.get('max_drawdown', 0)
+                    'dd': stats.get('max_drawdown', 0),
+                    'long_win': stats.get('long_win', 0),
+                    'long_loss': stats.get('long_loss', 0),
+                    'short_win': stats.get('short_win', 0),
+                    'short_loss': stats.get('short_loss', 0)
                 })
 
                 logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x → {stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
 
-    # Display TOP 10 results
+    # Display ALL results
     logger.info("")
-    logger.info("=" * 100)
-    logger.info("📊 TOP 10 CONFIGURAÇÕES (por ROI)")
-    logger.info("=" * 100)
+    logger.info("=" * 140)
+    logger.info("📊 TODAS AS CONFIGURAÇÕES TESTADAS (por ROI)")
+    logger.info("=" * 140)
     logger.info("")
 
     # Sort by ROI
-    grid_sorted = sorted(grid_results, key=lambda x: x['roi'], reverse=True)[:10]
+    grid_sorted = sorted(grid_results, key=lambda x: x['roi'], reverse=True)
 
-    header = f"{'#':<4} | {'Conf':<6} | {'SL':<5} | {'TP':<5} | {'Trades':<7} | {'WR':<7} | {'ROI':<9} | {'Sharpe':<7} | {'PF':<6} | {'DD':<7}"
+    header = f"{'#':<3} | {'Conf':<5} | {'SL':<4} | {'TP':<4} | {'Trades':<6} | {'WR':<6} | {'ROI':<8} | {'Sharpe':<6} | {'PF':<5} | {'DD':<6} | {'Long W/L':<9} | {'Short W/L':<9}"
     logger.info(header)
-    logger.info("-" * 100)
+    logger.info("-" * 140)
 
     for i, r in enumerate(grid_sorted, 1):
         if r['trades'] > 0:
+            long_wl = f"{r['long_win']}/{r['long_loss']}"
+            short_wl = f"{r['short_win']}/{r['short_loss']}"
             logger.info(
-                f"{i:<4} | "
-                f"{r['conf']*100:>5.0f}% | "
-                f"{r['sl']:>4.1f}x | "
-                f"{r['tp']:>4.1f}x | "
-                f"{r['trades']:>7} | "
-                f"{r['wr']*100:>6.1f}% | "
-                f"{r['roi']:>+8.2f}% | "
+                f"{i:<3} | "
+                f"{r['conf']*100:>4.0f}% | "
+                f"{r['sl']:>3.1f}x | "
+                f"{r['tp']:>3.1f}x | "
+                f"{r['trades']:>6} | "
+                f"{r['wr']*100:>5.1f}% | "
+                f"{r['roi']:>+7.2f}% | "
                 f"{r['sharpe']:>6.2f} | "
                 f"{r['pf']:>5.2f} | "
-                f"{r['dd']:>6.1f}%"
+                f"{r['dd']:>5.1f}% | "
+                f"{long_wl:>9} | "
+                f"{short_wl:>9}"
             )
 
     # Best configuration
