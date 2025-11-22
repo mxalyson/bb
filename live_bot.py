@@ -684,7 +684,7 @@ class LiveTradingBot:
         self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))  # Otimizado: 100% WR nos testes!
 
         # Cooldown between trades (seconds)
-        self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
+        self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '0'))  # NO COOLDOWN - permite trades consecutivos
 
         # Dry run mode
         self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
