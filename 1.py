@@ -451,7 +451,7 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df_feat = df.copy()
 
-    logger.info("   Creating ultra_scalper features...")
+    # Creating ultra_scalper features...
 
     # === BASIC RETURNS (for compatibility) ===
     df_feat['returns_5'] = df_feat['close'].pct_change(5)
@@ -676,7 +676,7 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     # Fill NaN
     df_feat = df_feat.fillna(method='ffill').fillna(method='bfill').fillna(0)
 
-    logger.info(f"   ✅ Ultra scalper features created")
+    # Ultra scalper features created
 
     return df_feat
 
@@ -952,13 +952,7 @@ class StrategyValidator:
         capital = self.initial_capital
         cooldown = 0
 
-        logger.info("=" * 80)
-        logger.info("🚀 STARTING BACKTEST SIMULATION")
-        logger.info("=" * 80)
-        logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
-        logger.info(f"Risk per Trade: {self.risk_per_trade*100:.2f}%")
-        logger.info(f"Total Candles: {len(df):,}")
-        logger.info("")
+        # Backtest simulation starting (logs suppressed for clean output)
 
         for i in range(len(df)):
             current = df.iloc[i]
