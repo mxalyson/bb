@@ -1502,238 +1502,116 @@ def main():
         logger.error(f"❌ Failed to load model: {e}")
         return
 
-    # Test different confidence levels (expanded to 90%)
-    confidence_levels = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
-    
+    # ========================================================================
+    # GRID SEARCH COMPLETO: Confiança x SL x TP
+    # ========================================================================
     logger.info("=" * 80)
-    logger.info("🧪 TESTANDO DIFERENTES NÍVEIS DE CONFIANÇA")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    results = []
-    
-    for min_conf in confidence_levels:
-        logger.info(f"Testing min confidence: {min_conf:.0%}...")
-        stats = validator.backtest_with_confidence(df_features.copy(), min_conf)
-        results.append(stats)
-    
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("📊 RESULTADOS COMPARATIVOS")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    # Create comparison table
-    print_comparison_table(results, args.days)
-    
-    # Best configuration analysis
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("🏆 ANÁLISE DE MELHOR CONFIGURAÇÃO")
+    logger.info("🔥 GRID SEARCH COMPLETO - Confiança x SL x TP")
     logger.info("=" * 80)
     logger.info("")
 
-    analyze_best_config(results, config, model_path, df_features, args)
+    # Grid parameters
+    confidence_levels = [0.0, 0.25, 0.40, 0.50, 0.60]
+    sl_mults = [1.5, 2.0]
+    tp_mults = [0.7, 1.0, 1.2]
 
+    total_configs = len(confidence_levels) * len(sl_mults) * len(tp_mults)
 
-def print_comparison_table(results, days):
-    """Print comparison table."""
-    
-    header = f"{'Conf':<6} | {'Trades':<7} | {'WR':<6} | {'ROI':<8} | {'ROI/yr':<8} | {'PF':<6} | {'Sharpe':<7} | {'DD':<7} | {'Avg Conf':<9}"
+    logger.info(f"Testando {total_configs} configurações:")
+    logger.info(f"   Confidências: {[f'{c:.0%}' for c in confidence_levels]}")
+    logger.info(f"   SL: {[f'{s:.1f}x' for s in sl_mults]}")
+    logger.info(f"   TP: {[f'{t:.1f}x' for t in tp_mults]}")
+    logger.info("")
+
+    grid_results = []
+    count = 0
+
+    for conf in confidence_levels:
+        for sl in sl_mults:
+            for tp in tp_mults:
+                count += 1
+                logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x... ", end="")
+
+                # Create validator with specific ATR settings
+                validator_grid = StrategyValidator(
+                    config,
+                    model_path,
+                    verbose_trades=False,
+                    fee_type=args.fee_type,
+                    sl_atr_mult=sl,
+                    tp_atr_mult=tp
+                )
+
+                # Run backtest
+                stats = validator_grid.backtest_with_confidence(df_features.copy(), conf)
+
+                grid_results.append({
+                    'conf': conf,
+                    'sl': sl,
+                    'tp': tp,
+                    'trades': stats.get('total_trades', 0),
+                    'wr': stats.get('win_rate', 0),
+                    'roi': stats.get('roi', 0),
+                    'sharpe': stats.get('sharpe_ratio', 0),
+                    'pf': stats.get('profit_factor', 0),
+                    'dd': stats.get('max_drawdown', 0)
+                })
+
+                logger.info(f"✓ ({stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI)")
+
+    # Display TOP 10 results
+    logger.info("")
+    logger.info("=" * 100)
+    logger.info("📊 TOP 10 CONFIGURAÇÕES (por ROI)")
+    logger.info("=" * 100)
+    logger.info("")
+
+    # Sort by ROI
+    grid_sorted = sorted(grid_results, key=lambda x: x['roi'], reverse=True)[:10]
+
+    header = f"{'#':<4} | {'Conf':<6} | {'SL':<5} | {'TP':<5} | {'Trades':<7} | {'WR':<7} | {'ROI':<9} | {'Sharpe':<7} | {'PF':<6} | {'DD':<7}"
     logger.info(header)
-    logger.info("-" * len(header))
-    
-    for r in results:
-        if r.get('total_trades', 0) > 0:
-            roi_yearly = r['roi'] / (days / 365)
-            line = (f"{r['min_confidence']*100:>5.0f}% | "
-                   f"{r['total_trades']:>7,} | "
-                   f"{r['win_rate']*100:>5.1f}% | "
-                   f"{r['roi']:>+7.1f}% | "
-                   f"{roi_yearly:>+7.1f}% | "
-                   f"{r['profit_factor']:>5.2f} | "
-                   f"{r['sharpe_ratio']:>6.2f} | "
-                   f"{r['max_drawdown']:>6.1f}% | "
-                   f"{r['avg_ml_confidence']*100:>8.1f}%")
-            logger.info(line)
-        else:
-            logger.info(f"{r['min_confidence']*100:>5.0f}% | No trades")
+    logger.info("-" * 100)
 
-
-def analyze_best_config(results, config, model_path, df_features, args):
-    """Analyze and recommend best configuration."""
-
-    valid_results = [r for r in results if r.get('total_trades', 0) > 0]
-    
-    if not valid_results:
-        logger.info("❌ No valid results to analyze")
-        return
-    
-    # Best by different metrics
-    best_roi = max(valid_results, key=lambda x: x['roi'])
-    best_sharpe = max(valid_results, key=lambda x: x['sharpe_ratio'])
-    best_wr = max(valid_results, key=lambda x: x['win_rate'])
-    min_dd = min(valid_results, key=lambda x: x['max_drawdown'])
-    most_trades = max(valid_results, key=lambda x: x['total_trades'])
-    
-    logger.info("🎯 Melhor ROI:")
-    logger.info(f"   Confiança Mínima: {best_roi['min_confidence']:.0%}")
-    logger.info(f"   ROI: {best_roi['roi']:+.2f}%")
-    logger.info(f"   Win Rate: {best_roi['win_rate']*100:.1f}%")
-    logger.info(f"   Trades: {best_roi['total_trades']}")
-    logger.info("")
-    
-    logger.info("📈 Melhor Sharpe Ratio:")
-    logger.info(f"   Confiança Mínima: {best_sharpe['min_confidence']:.0%}")
-    logger.info(f"   Sharpe: {best_sharpe['sharpe_ratio']:.2f}")
-    logger.info(f"   ROI: {best_sharpe['roi']:+.2f}%")
-    logger.info(f"   Trades: {best_sharpe['total_trades']}")
-    logger.info("")
-    
-    logger.info("🎯 Melhor Win Rate:")
-    logger.info(f"   Confiança Mínima: {best_wr['min_confidence']:.0%}")
-    logger.info(f"   Win Rate: {best_wr['win_rate']*100:.1f}%")
-    logger.info(f"   ROI: {best_wr['roi']:+.2f}%")
-    logger.info(f"   Trades: {best_wr['total_trades']}")
-    logger.info("")
-    
-    logger.info("💪 Menor Drawdown:")
-    logger.info(f"   Confiança Mínima: {min_dd['min_confidence']:.0%}")
-    logger.info(f"   Max DD: {min_dd['max_drawdown']:.2f}%")
-    logger.info(f"   ROI: {min_dd['roi']:+.2f}%")
-    logger.info(f"   Trades: {min_dd['total_trades']}")
-    logger.info("")
-    
-    # Recommendation
-    logger.info("=" * 80)
-    logger.info("💡 RECOMENDAÇÃO")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    # Score each config
-    scores = []
-    for r in valid_results:
-        if r['total_trades'] < 20:  # Too few trades
-            continue
-        
-        score = 0
-        # ROI weight: 30%
-        score += (r['roi'] / max(x['roi'] for x in valid_results)) * 0.3
-        # Sharpe weight: 25%
-        score += (r['sharpe_ratio'] / max(x['sharpe_ratio'] for x in valid_results)) * 0.25
-        # Win Rate weight: 20%
-        score += (r['win_rate'] / max(x['win_rate'] for x in valid_results)) * 0.2
-        # Min DD weight: 15% (inverse)
-        score += (1 - abs(r['max_drawdown']) / max(abs(x['max_drawdown']) for x in valid_results)) * 0.15
-        # Trade count weight: 10% (prefer more trades for statistical significance)
-        score += (r['total_trades'] / max(x['total_trades'] for x in valid_results)) * 0.1
-        
-        scores.append((r, score))
-    
-    if scores:
-        best = max(scores, key=lambda x: x[1])
-        r = best[0]
-        
-        logger.info(f"🏆 Configuração Recomendada:")
-        logger.info(f"   MIN_ML_CONFIDENCE={r['min_confidence']:.2f}")
-        logger.info("")
-        logger.info(f"📊 Métricas:")
-        logger.info(f"   Total Trades: {r['total_trades']}")
-        logger.info(f"   Win Rate: {r['win_rate']*100:.1f}%")
-        logger.info(f"   ROI: {r['roi']:+.2f}%")
-        logger.info(f"   Sharpe: {r['sharpe_ratio']:.2f}")
-        logger.info(f"   Max DD: {r['max_drawdown']:.2f}%")
-        logger.info(f"   Profit Factor: {r['profit_factor']:.2f}")
-        logger.info(f"   Avg Confidence: {r['avg_ml_confidence']*100:.1f}%")
-        logger.info("")
-        logger.info(f"💾 Adicione no seu .env:")
-        logger.info(f"   MIN_ML_CONFIDENCE={r['min_confidence']}")
-
-    # ========================================================================
-    # TEST DIFFERENT ATR MULTIPLIERS
-    # ========================================================================
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("🎯 TESTANDO DIFERENTES ATR MULTIPLIERS")
-    logger.info("=" * 80)
-    logger.info("")
-
-    # Use best confidence from previous test
-    best_min_conf = best_roi['min_confidence']
-    logger.info(f"Usando MIN_CONFIDENCE = {best_min_conf:.2f} (melhor ROI)")
-    logger.info("")
-
-    # Test ATR combinations
-    atr_tests = [
-        (2.0, 1.0, "2.0x SL, 1.0x TP (padrão)"),
-        (2.0, 0.8, "2.0x SL, 0.8x TP"),
-        (2.0, 0.7, "2.0x SL, 0.7x TP"),
-        (1.5, 1.0, "1.5x SL, 1.0x TP"),
-        (1.5, 0.8, "1.5x SL, 0.8x TP"),
-        (1.5, 0.7, "1.5x SL, 0.7x TP"),
-    ]
-
-    atr_results = []
-
-    for sl_mult, tp_mult, desc in atr_tests:
-        logger.info(f"Testando {desc}...")
-
-        # Create new validator with these ATR settings
-        validator_atr = StrategyValidator(
-            config,
-            model_path,
-            verbose_trades=False,
-            fee_type=args.fee_type,
-            sl_atr_mult=sl_mult,
-            tp_atr_mult=tp_mult
-        )
-
-        # Run backtest with best confidence
-        stats = validator_atr.backtest_with_confidence(df_features.copy(), best_min_conf)
-
-        atr_results.append({
-            'sl_mult': sl_mult,
-            'tp_mult': tp_mult,
-            'desc': desc,
-            'total_trades': stats.get('total_trades', 0),
-            'win_rate': stats.get('win_rate', 0),
-            'roi': stats.get('roi', 0),
-            'sharpe': stats.get('sharpe_ratio', 0),
-            'max_dd': stats.get('max_drawdown', 0),
-            'profit_factor': stats.get('profit_factor', 0)
-        })
-
-    # Display ATR results
-    logger.info("")
-    logger.info("📊 RESULTADOS ATR MULTIPLIERS")
-    logger.info("=" * 80)
-    logger.info(f"{'ATR Config':<25} | Trades |  WR   |   ROI   | Sharpe | MaxDD | PF")
-    logger.info("-" * 80)
-
-    for r in atr_results:
-        if r['total_trades'] > 0:
+    for i, r in enumerate(grid_sorted, 1):
+        if r['trades'] > 0:
             logger.info(
-                f"{r['desc']:<25} | {r['total_trades']:>6} | "
-                f"{r['win_rate']*100:>5.1f}% | {r['roi']:>+7.2f}% | "
-                f"{r['sharpe']:>6.2f} | {r['max_dd']:>5.1f}% | {r['profit_factor']:>4.2f}"
+                f"{i:<4} | "
+                f"{r['conf']*100:>5.0f}% | "
+                f"{r['sl']:>4.1f}x | "
+                f"{r['tp']:>4.1f}x | "
+                f"{r['trades']:>7} | "
+                f"{r['wr']*100:>6.1f}% | "
+                f"{r['roi']:>+8.2f}% | "
+                f"{r['sharpe']:>6.2f} | "
+                f"{r['pf']:>5.2f} | "
+                f"{r['dd']:>6.1f}%"
             )
 
-    # Find best ATR by ROI
-    best_atr = max([r for r in atr_results if r['total_trades'] > 0],
-                   key=lambda x: x['roi'], default=None)
+    # Best configuration
+    best = grid_sorted[0]
 
-    if best_atr:
-        logger.info("")
-        logger.info("🏆 MELHOR CONFIGURAÇÃO ATR (por ROI):")
-        logger.info(f"   {best_atr['desc']}")
-        logger.info(f"   ROI: {best_atr['roi']:+.2f}%")
-        logger.info(f"   Win Rate: {best_atr['win_rate']*100:.1f}%")
-        logger.info(f"   Sharpe: {best_atr['sharpe']:.2f}")
-        logger.info("")
-        logger.info(f"💾 Adicione no seu .env:")
-        logger.info(f"   SL_ATR_MULT={best_atr['sl_mult']}")
-        logger.info(f"   TP_ATR_MULT={best_atr['tp_mult']}")
-
+    logger.info("")
+    logger.info("=" * 100)
+    logger.info("🏆 MELHOR CONFIGURAÇÃO GLOBAL")
+    logger.info("=" * 100)
+    logger.info("")
+    logger.info(f"🎯 Confiança: {best['conf']*100:.0f}%")
+    logger.info(f"🛑 SL: {best['sl']:.1f}x ATR")
+    logger.info(f"✅ TP: {best['tp']:.1f}x ATR")
+    logger.info("")
+    logger.info(f"📊 Resultados:")
+    logger.info(f"   Trades: {best['trades']}")
+    logger.info(f"   Win Rate: {best['wr']*100:.1f}%")
+    logger.info(f"   ROI: {best['roi']:+.2f}%")
+    logger.info(f"   Sharpe: {best['sharpe']:.2f}")
+    logger.info(f"   Profit Factor: {best['pf']:.2f}")
+    logger.info(f"   Max Drawdown: {best['dd']:.2f}%")
+    logger.info("")
+    logger.info("💾 Adicione no seu .env:")
+    logger.info(f"   MIN_ML_CONFIDENCE={best['conf']:.2f}")
+    logger.info(f"   SL_ATR_MULT={best['sl']:.1f}")
+    logger.info(f"   TP_ATR_MULT={best['tp']:.1f}")
     logger.info("")
     logger.info("=" * 80)
 
