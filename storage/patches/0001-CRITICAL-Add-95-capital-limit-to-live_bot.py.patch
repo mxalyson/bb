@@ -1,0 +1,63 @@
+From 9a7ddbc08a25c9ee06cb9a033319a454143a7f52 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 22 Nov 2025 00:37:04 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?=F0=9F=94=92=20CRITICAL:=20Add=2095%=20capi?=
+ =?UTF-8?q?tal=20limit=20to=20live=5Fbot.py?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PROBLEM:
+- Backtest (1.py) had 95% capital protection
+- Live bot had NO maximum limit → could use 100%+ capital
+- This is DANGEROUS for live trading!
+
+SOLUTION:
+- Added 95% capital limit in calculate_position_size()
+- Now backtest and live bot are IDENTICAL
+- Ensures 5% margin for fees and safety
+
+COMPARISON (Before → After):
+- Backtest: 95% limit ✅ → 95% limit ✅
+- Live bot: NO limit ❌ → 95% limit ✅
+
+Reference: 1.py line 1082
+File: live_bot.py lines 705-710
+---
+ live_bot.py | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/live_bot.py b/live_bot.py
+index f63b1ec..73b9788 100644
+--- a/live_bot.py
++++ b/live_bot.py
+@@ -690,13 +690,25 @@ class LiveTradingBot:
+         return False
+ 
+     def calculate_position_size(self, price: float, sl_price: float) -> float:
+-        """Calculate BTC quantity based on risk."""
++        """
++        Calculate BTC quantity based on risk.
++
++        CRITICAL PROTECTION: Limits position to 95% of capital (same as backtest)
++        """
+         sl_dist = abs((sl_price - price) / price)
+         risk_amt = self.capital * self.risk_per_trade
+ 
++        # Calculate quantity based on risk
+         qty_btc = (risk_amt / sl_dist) / price if sl_dist > 0 else self.min_qty
+         qty_btc = max(self.min_qty, qty_btc)
+ 
++        # CRITICAL: Limit to 95% of capital (same as 1.py line 1082)
++        size_usd = qty_btc * price
++        max_size_usd = self.capital * 0.95
++        if size_usd > max_size_usd:
++            qty_btc = max_size_usd / price
++            qty_btc = max(self.min_qty, qty_btc)  # Ensure still above minimum
++
+         return qty_btc
+ 
+     def open_position(self, current_candle, signal, confidence):
+-- 
+2.43.0
+
