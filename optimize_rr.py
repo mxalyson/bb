@@ -22,6 +22,7 @@ from core.utils import load_config, setup_logging
 from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
+import sys
 
 logger = None
 
@@ -38,18 +39,28 @@ class ModelWrapper:
         self.__dict__.update(kwargs)
 
 
+# Register ModelWrapper in __main__ module so pickle can find it
+sys.modules['__main__'].ModelWrapper = ModelWrapper
+
+
 class UniversalUnpickler(pickle.Unpickler):
     """Custom unpickler that can handle missing classes."""
     def find_class(self, module, name):
-        # Handle missing ModelWrapper class
+        # Handle ModelWrapper from any module
         if name == 'ModelWrapper':
             return ModelWrapper
+
+        # Handle common missing classes
+        if name in ['StrategyValidator', 'TradingBot', 'ModelHandler']:
+            return ModelWrapper
+
         # Try normal loading first
         try:
             return super().find_class(module, name)
-        except (AttributeError, ModuleNotFoundError):
-            # If class not found, return a generic wrapper
-            return type(name, (), {})
+        except (AttributeError, ModuleNotFoundError) as e:
+            # If class not found, return ModelWrapper as fallback
+            print(f"   ⚠️  Class {module}.{name} not found, using ModelWrapper")
+            return ModelWrapper
 
 
 class RROptimizer:
@@ -59,17 +70,11 @@ class RROptimizer:
         self.config = config
         self.min_confidence = min_confidence
 
-        # Load model with universal unpickler
+        # Load model with universal unpickler (always use custom to avoid class issues)
         print(f"🔍 Loading model: {model_path}")
-        try:
-            with open(model_path, 'rb') as f:
-                self.model_data = pickle.load(f)
-            print(f"   ✅ Loaded with standard pickle")
-        except Exception as e:
-            print(f"   ⚠️  Standard load failed, trying custom unpickler...")
-            with open(model_path, 'rb') as f:
-                self.model_data = UniversalUnpickler(f).load()
-            print(f"   ✅ Loaded with custom unpickler")
+        with open(model_path, 'rb') as f:
+            self.model_data = UniversalUnpickler(f).load()
+        print(f"   ✅ Model loaded successfully")
 
         # Extract model and features
         if hasattr(self.model_data, 'feature_columns'):
