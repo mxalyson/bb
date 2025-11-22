@@ -81,6 +81,7 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat = df.copy()
 
     # === BASIC RETURNS (for compatibility) ===
+    df_feat['returns'] = df_feat['close'].pct_change()
     df_feat['returns_5'] = df_feat['close'].pct_change(5)
     df_feat['returns_10'] = df_feat['close'].pct_change(10)
 
@@ -126,10 +127,17 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['imbalance_ma'] = df_feat['order_imbalance'].rolling(20).mean()
 
     # === PRICE VS SMA RATIOS ===
-    sma7 = df_feat['close'].rolling(7).mean()
-    sma14 = df_feat['close'].rolling(14).mean()
-    sma21 = df_feat['close'].rolling(21).mean()
-    sma50 = df_feat['close'].rolling(50).mean()
+    # Create and store SMA features
+    df_feat['sma_7'] = df_feat['close'].rolling(7).mean()
+    df_feat['sma_14'] = df_feat['close'].rolling(14).mean()
+    df_feat['sma_21'] = df_feat['close'].rolling(21).mean()
+    df_feat['sma_50'] = df_feat['close'].rolling(50).mean()
+    df_feat['sma_100'] = df_feat['close'].rolling(100).mean()
+
+    sma7 = df_feat['sma_7']
+    sma14 = df_feat['sma_14']
+    sma21 = df_feat['sma_21']
+    sma50 = df_feat['sma_50']
 
     for period in [7, 14, 21, 50]:
         sma = df_feat['close'].rolling(period).mean()
@@ -140,10 +148,17 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['price_vs_sma21'] = (df_feat['close'] - sma21) / sma21 * 100
 
     # === EMA CROSSES ===
-    ema7 = df_feat['close'].ewm(span=7, adjust=False).mean()
-    ema14 = df_feat['close'].ewm(span=14, adjust=False).mean()
-    ema21 = df_feat['close'].ewm(span=21, adjust=False).mean()
-    ema50 = df_feat['close'].ewm(span=50, adjust=False).mean()
+    # Create and store EMA features
+    df_feat['ema_7'] = df_feat['close'].ewm(span=7, adjust=False).mean()
+    df_feat['ema_14'] = df_feat['close'].ewm(span=14, adjust=False).mean()
+    df_feat['ema_21'] = df_feat['close'].ewm(span=21, adjust=False).mean()
+    df_feat['ema_50'] = df_feat['close'].ewm(span=50, adjust=False).mean()
+    df_feat['ema_100'] = df_feat['close'].ewm(span=100, adjust=False).mean()
+
+    ema7 = df_feat['ema_7']
+    ema14 = df_feat['ema_14']
+    ema21 = df_feat['ema_21']
+    ema50 = df_feat['ema_50']
     ema200 = df_feat['close'].ewm(span=200, adjust=False).mean()
 
     df_feat['ema7_above_ema14'] = (ema7 > ema14).astype(int)
