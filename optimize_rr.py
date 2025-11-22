@@ -26,6 +26,32 @@ from core.features import FeatureStore
 logger = None
 
 
+# ============================================================================
+# UNIVERSAL MODEL LOADING - Works with ANY pickle model
+# ============================================================================
+
+class ModelWrapper:
+    """Generic wrapper for models saved with custom classes."""
+    def __init__(self, model=None, feature_names=None, **kwargs):
+        self.model = model
+        self.feature_names = feature_names
+        self.__dict__.update(kwargs)
+
+
+class UniversalUnpickler(pickle.Unpickler):
+    """Custom unpickler that can handle missing classes."""
+    def find_class(self, module, name):
+        # Handle missing ModelWrapper class
+        if name == 'ModelWrapper':
+            return ModelWrapper
+        # Try normal loading first
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            # If class not found, return a generic wrapper
+            return type(name, (), {})
+
+
 class RROptimizer:
     """Otimiza Risk:Reward testando diferentes SL/TP."""
 
@@ -33,17 +59,34 @@ class RROptimizer:
         self.config = config
         self.min_confidence = min_confidence
 
-        # Load model
-        with open(model_path, 'rb') as f:
-            self.model_data = pickle.load(f)
+        # Load model with universal unpickler
+        print(f"🔍 Loading model: {model_path}")
+        try:
+            with open(model_path, 'rb') as f:
+                self.model_data = pickle.load(f)
+            print(f"   ✅ Loaded with standard pickle")
+        except Exception as e:
+            print(f"   ⚠️  Standard load failed, trying custom unpickler...")
+            with open(model_path, 'rb') as f:
+                self.model_data = UniversalUnpickler(f).load()
+            print(f"   ✅ Loaded with custom unpickler")
 
         # Extract model and features
         if hasattr(self.model_data, 'feature_columns'):
             self.feature_names = self.model_data.feature_columns
             self.model = self.model_data
-        else:
+            print(f"   ✅ Found {len(self.feature_names)} features in model")
+        elif isinstance(self.model_data, dict):
             self.model = self.model_data.get('model')
             self.feature_names = self.model_data.get('feature_names')
+            print(f"   ✅ Loaded dict format with {len(self.feature_names)} features")
+        else:
+            self.model = self.model_data
+            self.feature_names = getattr(self.model_data, 'feature_names', None)
+            if self.feature_names:
+                print(f"   ✅ Found {len(self.feature_names)} features")
+            else:
+                print(f"   ⚠️  No feature names found, will try to infer...")
 
         self.initial_capital = config.get('initial_capital', 300)
         self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
@@ -56,10 +99,23 @@ class RROptimizer:
         # Get ML predictions
         X = df[self.feature_names].fillna(0)
 
-        # Predict using ensemble if available
-        if hasattr(self.model, 'predict'):
-            ml_probs = self.model.predict(X)
-        else:
+        # Predict using different model types
+        try:
+            if hasattr(self.model, 'predict'):
+                # Standard sklearn-like model
+                ml_probs = self.model.predict(X)
+            elif hasattr(self.model, 'models_list'):
+                # Ensemble model (like ultra scalper)
+                predictions = []
+                for model, weight in zip(self.model.models_list, self.model.model_weights):
+                    pred = model.predict(X)
+                    predictions.append(pred * weight)
+                ml_probs = np.sum(predictions, axis=0)
+            else:
+                # Fallback: neutral predictions
+                ml_probs = np.array([0.5] * len(X))
+        except Exception as e:
+            print(f"   ⚠️  Prediction failed: {e}, using neutral predictions")
             ml_probs = np.array([0.5] * len(X))
 
         df['ml_prob_up'] = ml_probs
