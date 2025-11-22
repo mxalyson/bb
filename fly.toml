@@ -1,0 +1,16 @@
+app = "btc-trading-bot"
+primary_region = "gru"  # São Paulo (ou use "mia" para Miami)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[processes]
+  app = "python3 live_bot.py"
