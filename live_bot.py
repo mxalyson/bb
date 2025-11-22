@@ -1405,6 +1405,24 @@ class LiveTradingBot:
                             logger.info("⏸️ Bot pausado - aguardando /resume")
                             time.sleep(10)
                             continue
+
+                        # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
+                        # Prevent opening trades on old candles when bot first starts
+                        candle_close_time = pd.Timestamp(current_candle_time)
+                        if candle_close_time.tz is None:
+                            candle_close_time = candle_close_time.tz_localize('UTC')
+
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
+
+                        # For 15min timeframe (900s), candle is "fresh" if closed within last 120s (2min)
+                        max_candle_age = 120  # 2 minutes
+
+                        if seconds_since_candle_close > max_candle_age:
+                            logger.info(f"⏭️ Candle antigo ({seconds_since_candle_close:.0f}s desde fechamento) - aguardando novo candle")
+                            time.sleep(10)
+                            continue
+
                         # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
                         if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
                             logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
