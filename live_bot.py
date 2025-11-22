@@ -648,7 +648,7 @@ class LiveTradingBot:
         # Environment variables
         self.symbol = os.getenv('SYMBOL', 'BTCUSDT')
         self.timeframe = os.getenv('TIMEFRAME', '15')
-        self.model_path = os.getenv('MODEL_PATH', 'storage/models/real_btc_ensemble_20251120_234339.pkl')
+        self.model_path = os.getenv('MODEL_PATH', 'ml_model_master_scalper_365d.pkl')  # Modelo otimizado (2788% ROI em 365 dias)
 
         # Trading parameters
         self.min_confidence = float(os.getenv('MIN_ML_CONFIDENCE', '0.25'))
