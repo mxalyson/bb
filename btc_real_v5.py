@@ -291,6 +291,7 @@ class MasterLiveTrader:
         self.trades_history = []
         self.cooldown_until = 0
         self.last_price = None
+        self.last_analyzed_candle_time = None  # 🔥 FIX: Track last analyzed candle to prevent duplicate analysis
 
         self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
         self.rest_client = BybitRESTClient(
@@ -497,8 +498,9 @@ class MasterLiveTrader:
 
     def get_signal(self, df: pd.DataFrame) -> tuple:
         try:
-            latest = df.iloc[-1]
-            X = df[self.feature_names].fillna(0).iloc[-1:].values
+            # 🔥 FIX: Use CLOSED candle (iloc[-2]) not incomplete candle (iloc[-1])
+            latest = df.iloc[-2]
+            X = df[self.feature_names].fillna(0).iloc[-2:-1].values
 
             ml_probs = self.model.predict(X)
 
@@ -527,7 +529,7 @@ class MasterLiveTrader:
             logger.error(f"Error in get_signal: {e}")
             import traceback
             traceback.print_exc()
-            return 0, 0.0, df.iloc[-1]
+            return 0, 0.0, df.iloc[-2]  # 🔥 FIX: Use closed candle
 
     def calculate_position_size(self, price: float, sl_price: float) -> float:
         """Calcula quantidade de BTC baseado no risco"""
@@ -942,8 +944,17 @@ Modo: {mode_str} ({network_str})
                         continue
 
                     fetch_time = time.time() - start_time
-                    current = df.iloc[-1]
+
+                    # 🔥 FIX: Use CLOSED candle (iloc[-2]) not incomplete candle (iloc[-1])
+                    current = df.iloc[-2]
+                    current_candle_time = current.name
                     price = current['close']
+
+                    # 🔥 FIX: Skip if already analyzed this candle
+                    if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
+                        logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
+                        time.sleep(check_interval)
+                        continue
 
                     if self.position:
                         self.last_price = price
@@ -983,6 +994,9 @@ Modo: {mode_str} ({network_str})
                             status = '✅ PASS' if passes else '❌ FILTERED'
 
                             logger.info(f"🎯 Signal: {sig_name} | Conf: {ml_confidence:.2%} | {status}")
+
+                            # 🔥 FIX: Mark this candle as analyzed
+                            self.last_analyzed_candle_time = current_candle_time
 
                             if signal != 0 and passes:
                                 logger.info("="*70)
