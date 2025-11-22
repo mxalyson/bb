@@ -134,17 +134,24 @@ def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0):
 # ============================================================================
 
 class TelegramNotifier:
-    """Send notifications to Telegram."""
+    """Send notifications to Telegram with interactive commands support."""
 
     def __init__(self, bot_token: str, chat_id: str):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = bool(bot_token and chat_id)
+        self.last_update_id = 0  # Track last processed update
+        self.bot_instance = None  # Reference to TradingBot for commands
 
         if self.enabled:
             logger.info("📱 Telegram notifications: ENABLED")
+            logger.info("📱 Telegram commands: ENABLED (/help para listar)")
         else:
             logger.warning("📱 Telegram notifications: DISABLED (missing credentials)")
+
+    def set_bot_instance(self, bot_instance):
+        """Set reference to TradingBot for command execution."""
+        self.bot_instance = bot_instance
 
     def send(self, message: str):
         """Send message to Telegram."""
@@ -164,6 +171,212 @@ class TelegramNotifier:
                 logger.warning(f"Telegram error: {response.text}")
         except Exception as e:
             logger.error(f"Failed to send Telegram: {e}")
+
+    def get_updates(self):
+        """Get new updates from Telegram."""
+        if not self.enabled:
+            return []
+
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            params = {
+                "offset": self.last_update_id + 1,
+                "timeout": 1,
+                "allowed_updates": ["message"]
+            }
+            response = requests.get(url, params=params, timeout=5)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    updates = data.get("result", [])
+                    if updates:
+                        self.last_update_id = updates[-1]["update_id"]
+                    return updates
+        except Exception as e:
+            logger.debug(f"Error getting Telegram updates: {e}")
+
+        return []
+
+    def process_command(self, command: str, args: list):
+        """Process Telegram command and return response."""
+        if not self.bot_instance:
+            return "❌ Bot not initialized"
+
+        bot = self.bot_instance
+
+        # Help command
+        if command == "/help":
+            return (
+                "🤖 <b>Comandos Disponíveis:</b>\n\n"
+                "<b>📊 Informações:</b>\n"
+                "/status - Status geral do bot\n"
+                "/position - Posição aberta atual\n"
+                "/capital - Capital atual\n\n"
+                "<b>⚙️ Controle:</b>\n"
+                "/pause - Pausar bot (não abre novos trades)\n"
+                "/resume - Retomar bot\n\n"
+                "<b>🔧 Configuração:</b>\n"
+                "/setconf &lt;0-100&gt; - Mudar confiança mínima (%)\n"
+                "/setrisk &lt;0.1-2.0&gt; - Mudar risco por trade (%)"
+            )
+
+        # Status command
+        elif command == "/status":
+            mode = "🔵 DRY RUN" if bot.dry_run else "🔴 LIVE"
+            network = "TESTNET" if bot.bybit_testnet else "MAINNET"
+            paused = "⏸️ PAUSADO" if hasattr(bot, 'paused') and bot.paused else "▶️ ATIVO"
+
+            return (
+                f"🤖 <b>Status do Bot</b>\n\n"
+                f"Estado: {paused}\n"
+                f"Modo: {mode}\n"
+                f"Network: {network}\n"
+                f"Symbol: {bot.symbol}\n"
+                f"Timeframe: {bot.timeframe}m\n\n"
+                f"⚙️ Config:\n"
+                f"Confiança Min: {bot.min_confidence*100:.0f}%\n"
+                f"Risco/Trade: {bot.risk_per_trade*100:.2f}%\n"
+                f"SL: {bot.sl_atr_mult}x ATR\n"
+                f"TP: {bot.tp_atr_mult}x ATR\n"
+                f"Cooldown: {bot.trade_cooldown/60:.0f}min"
+            )
+
+        # Position command
+        elif command == "/position":
+            if not bot.position:
+                return "📭 Nenhuma posição aberta"
+
+            pos = bot.position
+            direction_emoji = "🟢" if pos['direction'] == 'long' else "🔴"
+
+            # Calculate current PnL if we have last price
+            if bot.last_price:
+                if pos['direction'] == 'long':
+                    pnl_pct = ((bot.last_price - pos['entry_price']) / pos['entry_price']) * 100
+                else:
+                    pnl_pct = ((pos['entry_price'] - bot.last_price) / pos['entry_price']) * 100
+
+                pnl_usd = pos['size'] * (pnl_pct / 100)
+                fee = pos['size'] * 0.00055 * 2
+                pnl_net = pnl_usd - fee
+                pnl_emoji = "🟢" if pnl_net > 0 else "🔴"
+            else:
+                pnl_emoji = "⚪"
+                pnl_pct = 0
+                pnl_net = 0
+
+            duration = datetime.now() - pos['entry_time']
+            hours = int(duration.total_seconds() / 3600)
+            minutes = int((duration.total_seconds() % 3600) / 60)
+
+            return (
+                f"{direction_emoji} <b>Posição {pos['direction'].upper()}</b>\n\n"
+                f"Entrada: ${pos['entry_price']:,.2f}\n"
+                f"Atual: ${bot.last_price:,.2f}\n"
+                f"Qtd: {pos['qty_btc']} BTC\n\n"
+                f"{pnl_emoji} PnL: {pnl_pct:+.2f}% (${pnl_net:+,.2f})\n"
+                f"Duração: {hours}h {minutes}m\n\n"
+                f"🛑 SL: ${pos['stop_loss']:,.2f}\n"
+                f"🎯 TP: ${pos['take_profit']:,.2f}\n"
+                f"📊 Confiança: {pos.get('confidence', 0)*100:.0f}%"
+            )
+
+        # Capital command
+        elif command == "/capital":
+            return (
+                f"💰 <b>Capital</b>\n\n"
+                f"Atual: ${bot.capital:,.2f}\n"
+                f"Inicial: ${bot.initial_capital:,.2f}\n"
+                f"Variação: {((bot.capital/bot.initial_capital - 1)*100):+.2f}%"
+            )
+
+        # Pause command
+        elif command == "/pause":
+            if not hasattr(bot, 'paused'):
+                bot.paused = False
+
+            if bot.paused:
+                return "⏸️ Bot já está pausado"
+
+            bot.paused = True
+            logger.info("⏸️ Bot pausado via Telegram")
+            return "⏸️ <b>Bot Pausado</b>\n\nNão abrirá novos trades.\nPosições abertas continuam sendo monitoradas.\n\nUse /resume para retomar."
+
+        # Resume command
+        elif command == "/resume":
+            if not hasattr(bot, 'paused'):
+                bot.paused = False
+                return "▶️ Bot já está ativo"
+
+            if not bot.paused:
+                return "▶️ Bot já está ativo"
+
+            bot.paused = False
+            logger.info("▶️ Bot retomado via Telegram")
+            return "▶️ <b>Bot Retomado</b>\n\nVoltará a abrir trades conforme sinais."
+
+        # Set confidence command
+        elif command == "/setconf":
+            if not args:
+                return "❌ Uso: /setconf &lt;valor&gt;\n\nExemplo: /setconf 40"
+
+            try:
+                new_conf = float(args[0])
+                if not (0 <= new_conf <= 100):
+                    return "❌ Confiança deve estar entre 0 e 100"
+
+                old_conf = bot.min_confidence * 100
+                bot.min_confidence = new_conf / 100
+                logger.info(f"⚙️ Confiança alterada via Telegram: {old_conf:.0f}% → {new_conf:.0f}%")
+
+                return f"✅ <b>Confiança Atualizada</b>\n\n{old_conf:.0f}% → {new_conf:.0f}%"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 0 e 100."
+
+        # Set risk command
+        elif command == "/setrisk":
+            if not args:
+                return "❌ Uso: /setrisk &lt;valor&gt;\n\nExemplo: /setrisk 0.75"
+
+            try:
+                new_risk = float(args[0])
+                if not (0.1 <= new_risk <= 2.0):
+                    return "❌ Risco deve estar entre 0.1 e 2.0"
+
+                old_risk = bot.risk_per_trade * 100
+                bot.risk_per_trade = new_risk / 100
+                logger.info(f"⚙️ Risco alterado via Telegram: {old_risk:.2f}% → {new_risk:.2f}%")
+
+                return f"✅ <b>Risco Atualizado</b>\n\n{old_risk:.2f}% → {new_risk:.2f}%"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 0.1 e 2.0."
+
+        else:
+            return f"❌ Comando desconhecido: {command}\n\nUse /help para ver comandos disponíveis."
+
+    def check_commands(self):
+        """Check for new commands and process them."""
+        if not self.enabled or not self.bot_instance:
+            return
+
+        updates = self.get_updates()
+
+        for update in updates:
+            if "message" in update and "text" in update["message"]:
+                text = update["message"]["text"].strip()
+
+                # Check if it's a command (starts with /)
+                if text.startswith("/"):
+                    parts = text.split()
+                    command = parts[0].lower()
+                    args = parts[1:] if len(parts) > 1 else []
+
+                    logger.info(f"📱 Comando Telegram recebido: {command}")
+
+                    # Process command and send response
+                    response = self.process_command(command, args)
+                    self.send(response)
 
 
 # ============================================================================
@@ -456,6 +669,10 @@ class LiveTradingBot:
         telegram_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
         telegram_chat = os.getenv('TELEGRAM_CHAT_ID', '')
         self.telegram = TelegramNotifier(telegram_token, telegram_chat)
+        self.telegram.set_bot_instance(self)  # Enable commands
+
+        # Control flags
+        self.paused = False  # Can be controlled via Telegram /pause
 
         # Exchange client
         self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
@@ -1125,6 +1342,9 @@ class LiveTradingBot:
         try:
             while True:
                 try:
+                    # Check for Telegram commands
+                    self.telegram.check_commands()
+
                     # Get current data
                     df = self.get_current_data()
 
@@ -1141,6 +1361,11 @@ class LiveTradingBot:
 
                     # Check if we can open a new position
                     else:
+                        # Check if bot is paused
+                        if self.paused:
+                            logger.info("⏸️ Bot pausado - aguardando /resume")
+                            time.sleep(10)
+                            continue
                         # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
                         if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
                             logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
