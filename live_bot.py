@@ -1422,23 +1422,27 @@ class LiveTradingBot:
                             # Calculate confidence (CORRETO - same as 2.py)
                             ml_confidence = abs(pred - self.optimal_threshold) * 2
 
-                            # Determine signal (same as 2.py)
-                            if pred >= self.optimal_threshold:
+                            # 🔥 FIX: Determine signal EXACTLY same as 2.py
+                            # 2.py usa: (pred > threshold) não (pred >= threshold)
+                            # 2.py gera signal=0 (NEUTRO) quando pred == threshold ou confidence baixa
+                            signal = 0  # Start as NEUTRO
+                            if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
                                 signal = 1  # long
-                            else:
+                            elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
                                 signal = -1  # short
 
-                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {'LONG' if signal==1 else 'SHORT'} | Confiança: {ml_confidence:.1%}")
+                            sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
+                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {sig_name} | Confiança: {ml_confidence:.1%}")
 
                             # Mark this candle as analyzed (regardless of whether we trade)
                             self.last_analyzed_candle_time = current_candle_time
 
-                            # Check if confidence meets threshold
-                            if ml_confidence >= self.min_confidence:
-                                logger.info(f"✅ Confiança do sinal {ml_confidence:.1%} >= {self.min_confidence:.1%}")
+                            # Check if we have a valid signal (not NEUTRO)
+                            if signal != 0:
+                                logger.info(f"✅ Sinal válido: {sig_name} com confiança {ml_confidence:.1%} >= {self.min_confidence:.1%}")
                                 self.open_position(current, signal, ml_confidence)
                             else:
-                                logger.info(f"⏭️  Confiança {ml_confidence:.1%} < {self.min_confidence:.1%} - pulando")
+                                logger.info(f"⏭️  Sinal NEUTRO (pred={pred:.3f} ou confiança {ml_confidence:.1%} < {self.min_confidence:.1%}) - pulando")
 
                         except Exception as e:
                             logger.error(f"Prediction error: {e}")
