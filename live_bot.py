@@ -523,6 +523,14 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['volume_ratio'] = df_feat['volume'] / (df_feat['volume_sma_20'] + 1e-8)
     df_feat['high_volume'] = (df_feat['volume_ratio'] > 1.5).astype(int)
 
+    # Volume ratios for different periods (needed by model)
+    for period in [3, 5, 8, 13, 21]:
+        vol_sma = df_feat['volume'].rolling(period).mean()
+        df_feat[f'volume_ratio_{period}'] = df_feat['volume'] / (vol_sma + 1e-8)
+
+    # Volume momentum
+    df_feat['volume_momentum'] = df_feat['volume'].pct_change(5)
+
     # === CANDLE PATTERNS ===
     body = abs(df_feat['close'] - df_feat['open'])
     upper_wick = df_feat['high'] - df_feat[['close', 'open']].max(axis=1)
@@ -550,6 +558,22 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
         high_period = df_feat['high'].rolling(period).max()
         low_period = df_feat['low'].rolling(period).min()
         df_feat[f'price_position_{period}'] = (df_feat['close'] - low_period) / (high_period - low_period + 1e-8)
+
+    # Price position (general) - needed by model
+    high_20 = df_feat['high'].rolling(20).max()
+    low_20 = df_feat['low'].rolling(20).min()
+    df_feat['price_position'] = (df_feat['close'] - low_20) / (high_20 - low_20 + 1e-8)
+
+    # Price acceleration - needed by model
+    df_feat['price_acceleration'] = df_feat['returns'].diff(3)
+
+    # Trend strength - needed by model
+    df_feat['trend_strength'] = abs(df_feat['close'] - df_feat['sma_21']) / df_feat['atr']
+
+    # Volatility regime - needed by model
+    current_vol = df_feat['volatility_20']
+    vol_ma = current_vol.rolling(50).mean()
+    df_feat['volatility_regime'] = current_vol / (vol_ma + 1e-8)
 
     # === ORDER FLOW (simulated) ===
     close_position = (df_feat['close'] - df_feat['low']) / (df_feat['high'] - df_feat['low'] + 1e-8)
