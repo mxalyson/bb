@@ -1128,8 +1128,10 @@ class LiveTradingBot:
                     # Get current data
                     df = self.get_current_data()
 
-                    # Get last candle
-                    current = df.iloc[-1]
+                    # Get last CLOSED candle (penultimate = último fechado)
+                    # iloc[-1] = candle atual (incompleto)
+                    # iloc[-2] = último candle fechado ✅
+                    current = df.iloc[-2]
                     current_candle_time = current.name  # Candle timestamp
 
                     # Check if we have an open position
