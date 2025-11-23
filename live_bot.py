@@ -1049,6 +1049,15 @@ class LiveTradingBot:
                             order_id = result['orderId']
                             logger.info(f"✅ Order executed! ID: {order_id}")
 
+                            # 🔍 DEBUG: Log fee information from API
+                            if 'cumExecFee' in result:
+                                actual_fee = float(result['cumExecFee'])
+                                fee_pct = (actual_fee / size_usd) * 100
+                                logger.info(f"💰 Fee cobrada pela Bybit: ${actual_fee:.4f} ({fee_pct:.3f}%)")
+                                logger.info(f"💰 Fee esperada (0.055%): ${size_usd * 0.00055:.4f}")
+                                if fee_pct > 0.1:
+                                    logger.warning(f"⚠️ FEE MUITO ALTA! Deveria ser ~0.055%, está {fee_pct:.3f}%")
+
                             # Get actual fill price if available
                             if 'price' in result and result['price']:
                                 try:
