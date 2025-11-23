@@ -1464,8 +1464,14 @@ class LiveTradingBot:
                     # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
                     # Prevent opening trades on old candles when bot first starts
                     candle_open_time = pd.Timestamp(current_candle_time)
+
+                    # CRITICAL: Ensure both times are in same timezone (UTC)
                     if candle_open_time.tz is None:
+                        # Candle time is naive (no timezone), assume it's already UTC from Bybit
                         candle_open_time = candle_open_time.tz_localize('UTC')
+                    else:
+                        # Convert to UTC if it has a different timezone
+                        candle_open_time = candle_open_time.tz_convert('UTC')
 
                     # Add timeframe to get CLOSE time (candle.name is OPEN time)
                     timeframe_minutes = int(self.timeframe)
@@ -1474,10 +1480,20 @@ class LiveTradingBot:
                     now_utc = pd.Timestamp.now(tz='UTC')
                     seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
 
-                    # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
-                    max_candle_age = 90  # 90 seconds - mais ágil!
+                    # DEBUG: Show timezone comparison
+                    logger.info(f"🔍 Candle close: {candle_close_time} | Now UTC: {now_utc} | Diff: {seconds_since_candle_close:.0f}s")
 
-                    if seconds_since_candle_close > max_candle_age:
+                    # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
+                    # OR if seconds_since_candle_close is NEGATIVE (candle hasn't closed yet)
+                    max_candle_age = 90  # 90 seconds
+
+                    if seconds_since_candle_close < -60:
+                        # Candle closes in future (> 60s away) - too early
+                        logger.info(f"⏭️ Candle ainda não fechou (falta {-seconds_since_candle_close:.0f}s) - aguardando")
+                        time.sleep(5)
+                        continue
+                    elif seconds_since_candle_close > max_candle_age:
+                        # Candle closed too long ago
                         logger.info(f"⏭️ Candle antigo ({seconds_since_candle_close:.0f}s desde fechamento) - aguardando novo candle")
                         time.sleep(5)
                         continue
