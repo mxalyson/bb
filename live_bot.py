@@ -813,8 +813,8 @@ class LiveTradingBot:
     def get_current_data(self) -> pd.DataFrame:
         """Download latest data and build features."""
 
-        # Download data (15 days lookback for indicators - otimizado para velocidade)
-        lookback_days = 15
+        # Download data (30 days lookback for indicators - igual ao treinamento)
+        lookback_days = 30
 
         try:
             # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
