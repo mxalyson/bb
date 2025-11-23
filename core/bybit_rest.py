@@ -34,7 +34,7 @@ class BybitRESTClient:
         else:
             self.base_url = "https://api.bybit.com"
 
-        self.recv_window = 5000
+        self.recv_window = 20000  # Aumentado de 5000 para 20000ms (20s)
 
         # Session for connection pooling
         self.session = requests.Session()
@@ -96,27 +96,28 @@ class BybitRESTClient:
             params = {}
         
         headers = {}
-        
-        if signed:
-            timestamp = int(time.time() * 1000) + self.time_offset
-            
-            if method == 'GET':
-                params_str = urlencode(sorted(params.items()))
-            else:
-                import json
-                params_str = json.dumps(params)
-            
-            signature = self._generate_signature(params_str, timestamp)
-            
-            headers.update({
-                'X-BAPI-API-KEY': self.api_key,
-                'X-BAPI-SIGN': signature,
-                'X-BAPI-TIMESTAMP': str(timestamp),
-                'X-BAPI-RECV-WINDOW': str(self.recv_window)
-            })
-        
+        params_str = None
+
         # Retry loop
         for attempt in range(max_retries):
+            # Generate signature for each attempt (fresh timestamp)
+            if signed:
+                timestamp = int(time.time() * 1000) + self.time_offset
+
+                if method == 'GET':
+                    params_str = urlencode(sorted(params.items()))
+                else:
+                    import json
+                    params_str = json.dumps(params)
+
+                signature = self._generate_signature(params_str, timestamp)
+
+                headers.update({
+                    'X-BAPI-API-KEY': self.api_key,
+                    'X-BAPI-SIGN': signature,
+                    'X-BAPI-TIMESTAMP': str(timestamp),
+                    'X-BAPI-RECV-WINDOW': str(self.recv_window)
+                })
             try:
                 if method == 'GET':
                     response = self.session.get(
@@ -132,10 +133,19 @@ class BybitRESTClient:
                         headers=headers,
                         timeout=self.timeout
                     )
-                
+
                 response.raise_for_status()
-                return response.json()
-            
+                result = response.json()
+
+                # Check for timestamp error (retCode 10002) and retry
+                if result.get('retCode') == 10002 and attempt < max_retries - 1:
+                    logger.warning(f"⚠️ Timestamp error - re-syncing clock and retrying...")
+                    self._sync_server_time()
+                    time.sleep(0.5)
+                    continue
+
+                return result
+
             except requests.exceptions.Timeout:
                 logger.warning(f"Timeout on attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
@@ -144,7 +154,7 @@ class BybitRESTClient:
                 else:
                     logger.error(f"Request timed out after {max_retries} attempts")
                     raise
-            
+
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"Connection error on attempt {attempt + 1}/{max_retries}: {e}")
                 if attempt < max_retries - 1:
@@ -153,7 +163,7 @@ class BybitRESTClient:
                 else:
                     logger.error(f"Connection failed after {max_retries} attempts")
                     raise
-            
+
             except Exception as e:
                 logger.error(f"Request failed: {e}")
                 raise
