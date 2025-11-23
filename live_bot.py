@@ -1400,9 +1400,13 @@ class LiveTradingBot:
 
                         # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
                         # Prevent opening trades on old candles when bot first starts
-                        candle_close_time = pd.Timestamp(current_candle_time)
-                        if candle_close_time.tz is None:
-                            candle_close_time = candle_close_time.tz_localize('UTC')
+                        candle_open_time = pd.Timestamp(current_candle_time)
+                        if candle_open_time.tz is None:
+                            candle_open_time = candle_open_time.tz_localize('UTC')
+
+                        # Add timeframe to get CLOSE time (candle.name is OPEN time)
+                        timeframe_minutes = int(self.timeframe)
+                        candle_close_time = candle_open_time + pd.Timedelta(minutes=timeframe_minutes)
 
                         now_utc = pd.Timestamp.now(tz='UTC')
                         seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
