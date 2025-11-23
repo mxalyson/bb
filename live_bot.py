@@ -1367,6 +1367,19 @@ class LiveTradingBot:
             import traceback
             traceback.print_exc()
 
+    def get_seconds_to_next_candle(self):
+        """Calculate seconds until next candle closes."""
+        now = datetime.now()
+        timeframe_minutes = int(self.timeframe)
+
+        # Calculate next candle close time
+        minutes_since_hour = now.minute % timeframe_minutes
+        seconds_in_candle = (minutes_since_hour * 60) + now.second
+        total_candle_seconds = timeframe_minutes * 60
+        seconds_to_close = total_candle_seconds - seconds_in_candle
+
+        return seconds_to_close
+
     def run(self):
         """Main trading loop."""
 
@@ -1383,6 +1396,43 @@ class LiveTradingBot:
                     # Check for Telegram commands
                     self.telegram.check_commands()
 
+                    # ================================================================
+                    # OTIMIZAÇÃO: Diferentes fluxos para com/sem posição
+                    # ================================================================
+
+                    if self.position:
+                        # ============================================================
+                        # COM POSIÇÃO: Só verifica SL/TP (sem baixar tudo)
+                        # ============================================================
+                        result = self.check_position_closed()
+
+                        if result:
+                            exit_price, reason = result
+                            # Get current candle for timestamp (apenas 1 dia, muito mais leve)
+                            df_light = self.data_manager.get_data(self.symbol, f'{self.timeframe}m', 1, False)
+                            current = df_light.iloc[-2]
+                            self.close_position(current, reason, close=exit_price)
+
+                        # Sleep maior quando tem posição (só monitora SL/TP)
+                        time.sleep(10)
+                        continue
+
+                    # ============================================================
+                    # SEM POSIÇÃO: Aguarda próximo fechamento de vela
+                    # ============================================================
+
+                    # Calcular tempo até próxima vela fechar
+                    seconds_to_close = self.get_seconds_to_next_candle()
+
+                    # Se falta mais de 60s, aguarda
+                    if seconds_to_close > 60:
+                        logger.info(f"⏳ Aguardando próxima vela fechar em {seconds_to_close:.0f}s ({seconds_to_close/60:.1f}min)...")
+                        time.sleep(min(seconds_to_close - 45, 60))  # Acorda 45s antes do fechamento
+                        continue
+
+                    # Chegou perto do fechamento (< 60s): baixa dados e analisa
+                    logger.info(f"🔍 Vela fechando em {seconds_to_close:.0f}s - analisando...")
+
                     # Get current data
                     df = self.get_current_data()
 
@@ -1396,103 +1446,94 @@ class LiveTradingBot:
                     now = datetime.now()
                     logger.info(f"⏰ Sistema: {now.strftime('%Y-%m-%d %H:%M:%S')} | Candle: {current_candle_time} | Close: ${current['close']:,.2f}")
 
-                    # Check if we have an open position
-                    if self.position:
-                        # Check exit conditions
-                        self.check_position_exit(current)
+                    # Check if bot is paused
+                    if self.paused:
+                        logger.info("⏸️ Bot pausado - aguardando /resume")
+                        time.sleep(5)
+                        continue
 
-                    # Check if we can open a new position
-                    else:
-                        # Check if bot is paused
-                        if self.paused:
-                            logger.info("⏸️ Bot pausado - aguardando /resume")
+                    # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
+                    # Prevent opening trades on old candles when bot first starts
+                    candle_open_time = pd.Timestamp(current_candle_time)
+                    if candle_open_time.tz is None:
+                        candle_open_time = candle_open_time.tz_localize('UTC')
+
+                    # Add timeframe to get CLOSE time (candle.name is OPEN time)
+                    timeframe_minutes = int(self.timeframe)
+                    candle_close_time = candle_open_time + pd.Timedelta(minutes=timeframe_minutes)
+
+                    now_utc = pd.Timestamp.now(tz='UTC')
+                    seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
+
+                    # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
+                    max_candle_age = 90  # 90 seconds - mais ágil!
+
+                    if seconds_since_candle_close > max_candle_age:
+                        logger.info(f"⏭️ Candle antigo ({seconds_since_candle_close:.0f}s desde fechamento) - aguardando novo candle")
+                        time.sleep(5)
+                        continue
+
+                    # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
+                    if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
+                        logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
+                        time.sleep(5)
+                        continue
+
+                    # Check cooldown
+                    if self.last_trade_time:
+                        time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
+                        if time_since_last_trade < self.trade_cooldown:
+                            remaining = self.trade_cooldown - time_since_last_trade
+                            logger.info(f"⏳ Cooldown: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
                             time.sleep(5)
                             continue
 
-                        # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
-                        # Prevent opening trades on old candles when bot first starts
-                        candle_open_time = pd.Timestamp(current_candle_time)
-                        if candle_open_time.tz is None:
-                            candle_open_time = candle_open_time.tz_localize('UTC')
+                    # Make prediction
+                    try:
+                        logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
 
-                        # Add timeframe to get CLOSE time (candle.name is OPEN time)
-                        timeframe_minutes = int(self.timeframe)
-                        candle_close_time = candle_open_time + pd.Timedelta(minutes=timeframe_minutes)
+                        # Get prediction for ONLY the last closed candle (iloc[-2])
+                        df_single = df.iloc[[-2]].copy()
 
-                        now_utc = pd.Timestamp.now(tz='UTC')
-                        seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
+                        predictions = make_prediction(
+                            self.model,
+                            self.model_data,
+                            df_single,
+                            self.feature_names
+                        )
 
-                        # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
-                        max_candle_age = 90  # 90 seconds - mais ágil!
+                        # Get prediction
+                        pred = predictions[0]  # Only one prediction
 
-                        if seconds_since_candle_close > max_candle_age:
-                            logger.info(f"⏭️ Candle antigo ({seconds_since_candle_close:.0f}s desde fechamento) - aguardando novo candle")
-                            time.sleep(5)
-                            continue
+                        # Calculate confidence (CORRETO - same as 2.py)
+                        ml_confidence = abs(pred - self.optimal_threshold) * 2
 
-                        # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
-                        if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
-                            logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
-                            time.sleep(5)
-                            continue
-                        # Check cooldown
-                        if self.last_trade_time:
-                            time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
-                            if time_since_last_trade < self.trade_cooldown:
-                                remaining = self.trade_cooldown - time_since_last_trade
-                                logger.info(f"⏳ Cooldown: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
-                                time.sleep(5)
-                                continue
+                        # 🔥 FIX: Determine signal EXACTLY same as 2.py
+                        # 2.py usa: (pred > threshold) não (pred >= threshold)
+                        # 2.py gera signal=0 (NEUTRO) quando pred == threshold ou confidence baixa
+                        signal = 0  # Start as NEUTRO
+                        if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
+                            signal = 1  # long
+                        elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
+                            signal = -1  # short
 
-                        # Make prediction
-                        try:
-                            logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
+                        sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
+                        logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {sig_name} | Confiança: {ml_confidence:.1%}")
 
-                            # Get prediction for ONLY the last closed candle (iloc[-2])
-                            df_single = df.iloc[[-2]].copy()
+                        # Mark this candle as analyzed (regardless of whether we trade)
+                        self.last_analyzed_candle_time = current_candle_time
 
-                            predictions = make_prediction(
-                                self.model,
-                                self.model_data,
-                                df_single,
-                                self.feature_names
-                            )
+                        # Check if we have a valid signal (not NEUTRO)
+                        if signal != 0:
+                            logger.info(f"✅ Sinal válido: {sig_name} com confiança {ml_confidence:.1%} >= {self.min_confidence:.1%}")
+                            self.open_position(current, signal, ml_confidence)
+                        else:
+                            logger.info(f"⏭️  Sinal NEUTRO (pred={pred:.3f} ou confiança {ml_confidence:.1%} < {self.min_confidence:.1%}) - pulando")
 
-                            # Get prediction
-                            pred = predictions[0]  # Only one prediction
-
-                            # Calculate confidence (CORRETO - same as 2.py)
-                            ml_confidence = abs(pred - self.optimal_threshold) * 2
-
-                            # 🔥 FIX: Determine signal EXACTLY same as 2.py
-                            # 2.py usa: (pred > threshold) não (pred >= threshold)
-                            # 2.py gera signal=0 (NEUTRO) quando pred == threshold ou confidence baixa
-                            signal = 0  # Start as NEUTRO
-                            if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
-                                signal = 1  # long
-                            elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
-                                signal = -1  # short
-
-                            sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
-                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {sig_name} | Confiança: {ml_confidence:.1%}")
-
-                            # Mark this candle as analyzed (regardless of whether we trade)
-                            self.last_analyzed_candle_time = current_candle_time
-
-                            # Check if we have a valid signal (not NEUTRO)
-                            if signal != 0:
-                                logger.info(f"✅ Sinal válido: {sig_name} com confiança {ml_confidence:.1%} >= {self.min_confidence:.1%}")
-                                self.open_position(current, signal, ml_confidence)
-                            else:
-                                logger.info(f"⏭️  Sinal NEUTRO (pred={pred:.3f} ou confiança {ml_confidence:.1%} < {self.min_confidence:.1%}) - pulando")
-
-                        except Exception as e:
-                            logger.error(f"Prediction error: {e}")
-                            import traceback
-                            traceback.print_exc()
-
-                    # Wait before next iteration (no loop cooldown, just sleep a bit)
-                    time.sleep(5)
+                    except Exception as e:
+                        logger.error(f"Prediction error: {e}")
+                        import traceback
+                        traceback.print_exc()
 
                 except KeyboardInterrupt:
                     raise
