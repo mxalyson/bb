@@ -1439,8 +1439,15 @@ class LiveTradingBot:
                         time.sleep(min(seconds_to_close - 45, 60))  # Acorda 45s antes do fechamento
                         continue
 
-                    # Chegou perto do fechamento (< 60s): baixa dados e analisa
-                    logger.info(f"🔍 Vela fechando em {seconds_to_close:.0f}s - analisando...")
+                    # Se ainda falta tempo (0-60s), aguarda até DEPOIS do fechamento
+                    if seconds_to_close > -10:  # Espera até 10s DEPOIS do fechamento
+                        wait_time = seconds_to_close + 15  # Fecha + 15s de margem
+                        if wait_time > 0:
+                            logger.info(f"⏳ Vela fecha em {seconds_to_close:.0f}s - aguardando mais {wait_time:.0f}s...")
+                            time.sleep(wait_time)
+
+                    # Agora sim, vela fechou - baixa dados
+                    logger.info(f"🔍 Vela fechou - baixando dados...")
 
                     # Get current data
                     df = self.get_current_data()
