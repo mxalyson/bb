@@ -1198,8 +1198,19 @@ class LiveTradingBot:
 
                     # Position not found = was closed
                     logger.info("✅ Position not found - was closed")
-                    exit_price = self.last_price if self.last_price else self.position['take_profit']
-                    return (exit_price, 'take_profit')
+                    exit_price = self.last_price if self.last_price else self.position['entry_price']
+
+                    # Determine reason based on exit price vs entry
+                    entry = self.position['entry_price']
+                    direction = self.position['direction']
+
+                    if direction == 'long':
+                        reason = 'stop_loss' if exit_price < entry else 'take_profit'
+                    else:
+                        reason = 'stop_loss' if exit_price > entry else 'take_profit'
+
+                    logger.info(f"📊 Inferindo reason: {reason} (exit=${exit_price:,.2f}, entry=${entry:,.2f})")
+                    return (exit_price, reason)
 
         except Exception as e:
             logger.error(f"⚠️ Error checking position: {e}")
