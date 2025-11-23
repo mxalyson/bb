@@ -813,8 +813,8 @@ class LiveTradingBot:
     def get_current_data(self) -> pd.DataFrame:
         """Download latest data and build features."""
 
-        # Download data (30 days lookback for indicators)
-        lookback_days = 30
+        # Download data (15 days lookback for indicators - otimizado para velocidade)
+        lookback_days = 15
 
         try:
             # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
@@ -1375,23 +1375,15 @@ class LiveTradingBot:
                     # Get current data
                     df = self.get_current_data()
 
-                    # DEBUG: Log últimos candles
-                    logger.info(f"📊 Últimos 3 candles:")
-                    for i in range(-3, 0):
-                        candle = df.iloc[i]
-                        logger.info(f"   [{i}] {candle.name} | Close: ${candle['close']:,.2f}")
-
                     # Get last CLOSED candle (penultimate = último fechado)
                     # iloc[-1] = candle atual (incompleto)
                     # iloc[-2] = último candle fechado ✅
                     current = df.iloc[-2]
                     current_candle_time = current.name  # Candle timestamp
 
-                    # DEBUG: Mostrar horários
+                    # DEBUG: Mostrar informações do candle
                     now = datetime.now()
-                    logger.info(f"⏰ Sistema: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-                    logger.info(f"🕐 Candle analisando: {current_candle_time}")
-                    logger.info(f"🕑 Último analisado: {self.last_analyzed_candle_time}")
+                    logger.info(f"⏰ Sistema: {now.strftime('%Y-%m-%d %H:%M:%S')} | Candle: {current_candle_time} | Close: ${current['close']:,.2f}")
 
                     # Check if we have an open position
                     if self.position:
@@ -1403,7 +1395,7 @@ class LiveTradingBot:
                         # Check if bot is paused
                         if self.paused:
                             logger.info("⏸️ Bot pausado - aguardando /resume")
-                            time.sleep(10)
+                            time.sleep(5)
                             continue
 
                         # 🔥 FIX: Check if candle is "fresh" (fechou recentemente)
@@ -1415,18 +1407,18 @@ class LiveTradingBot:
                         now_utc = pd.Timestamp.now(tz='UTC')
                         seconds_since_candle_close = (now_utc - candle_close_time).total_seconds()
 
-                        # For 15min timeframe (900s), candle is "fresh" if closed within last 120s (2min)
-                        max_candle_age = 120  # 2 minutes
+                        # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
+                        max_candle_age = 90  # 90 seconds - mais ágil!
 
                         if seconds_since_candle_close > max_candle_age:
                             logger.info(f"⏭️ Candle antigo ({seconds_since_candle_close:.0f}s desde fechamento) - aguardando novo candle")
-                            time.sleep(10)
+                            time.sleep(5)
                             continue
 
                         # CRITICAL: Only analyze if this is a NEW candle (same as backtest)
                         if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
                             logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
-                            time.sleep(10)
+                            time.sleep(5)
                             continue
                         # Check cooldown
                         if self.last_trade_time:
@@ -1434,11 +1426,13 @@ class LiveTradingBot:
                             if time_since_last_trade < self.trade_cooldown:
                                 remaining = self.trade_cooldown - time_since_last_trade
                                 logger.info(f"⏳ Cooldown: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
-                                time.sleep(10)
+                                time.sleep(5)
                                 continue
 
                         # Make prediction
                         try:
+                            logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
+
                             # Get prediction for ONLY the last closed candle (iloc[-2])
                             df_single = df.iloc[[-2]].copy()
 
