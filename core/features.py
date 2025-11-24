@@ -8,7 +8,9 @@ from typing import Dict, Optional
 import logging
 
 from core.indicators import calculate_all_indicators
-from core.structure_pa_optimized import PriceActionAnalyzer  # OPTIMIZED VERSION (100x faster)
+# TEMPORARY: Revert to original to debug empty DataFrame issue
+from core.structure_pa import PriceActionAnalyzer  # Original (slow but stable)
+# from core.structure_pa_optimized import PriceActionAnalyzer  # OPTIMIZED VERSION (100x faster)
 
 logger = logging.getLogger("TradingBot.Features")
 
@@ -43,8 +45,29 @@ class FeatureStore:
         if orderbook:
             df = self.add_microstructure_features(df, orderbook, trades)
 
+        # DEBUG: Check DataFrame before dropna()
+        logger.info(f"   Before dropna(): {df.shape}")
+        if df.empty:
+            logger.error("   ❌ DataFrame is EMPTY before dropna()!")
+            return df
+
+        # Check for columns with all NaN
+        all_nan_cols = df.columns[df.isnull().all()].tolist()
+        if all_nan_cols:
+            logger.warning(f"   ⚠️ Columns with all NaN: {all_nan_cols}")
+
+        # Check how many rows have at least one NaN
+        rows_with_nan = df.isnull().any(axis=1).sum()
+        logger.info(f"   Rows with at least one NaN: {rows_with_nan}/{len(df)}")
+
         # Remove NaN rows at start
         df = df.dropna()
+
+        logger.info(f"   After dropna(): {df.shape}")
+        if df.empty:
+            logger.error("   ❌ DataFrame is EMPTY after dropna()!")
+            logger.error("   All rows had at least one NaN value")
+            return df
 
         if normalize:
             df = self.normalize_features(df)
