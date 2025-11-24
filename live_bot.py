@@ -762,9 +762,18 @@ def make_prediction(model, model_data, df, feature_names):
         logger.info(f"   📊 Ensemble: {len(predictions)}/{len(model.models_list)} models succeeded")
 
     else:
-        # Standard model
+        # Standard model (LightGBM from dict)
         X = df[feature_names].values
 
+        # Apply scaler if exists in model_data (for dict-based models)
+        if 'scaler_mean' in model_data and 'scaler_std' in model_data:
+            scaler_mean = np.array(model_data['scaler_mean'])
+            scaler_std = np.array(model_data['scaler_std'])
+            X = (X - scaler_mean) / (scaler_std + 1e-8)
+            logger.info("   🔢 Applied Z-score normalization (scaler_mean/scaler_std)")
+
+        # LightGBM models use .predict() not .predict_proba()
+        # And return probabilities directly
         if hasattr(model, 'predict_proba'):
             final_pred = model.predict_proba(X)[:, 1]
         else:
