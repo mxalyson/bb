@@ -985,8 +985,32 @@ class LiveTradingBot:
 
             # NOTE: 3.py does NOT do dropna() after V1 features
             # FeatureStore already did dropna(), and make_prediction() will handle NaN if needed
-            logger.info(f"   ✅ Features ready: {df_features.shape}")
-            logger.info(f"   📍 Last candle: {df_features.index[-1]} | Close: ${df_features['close'].iloc[-1]:,.2f}")
+
+            # CRITICAL: Remove current (incomplete) candle
+            # Bybit API returns the current candle which hasn't closed yet
+            # We only want CLOSED candles for analysis
+            now_utc = pd.Timestamp.now(tz='UTC')
+            timeframe_minutes = int(self.timeframe)
+
+            # Filter out candles that haven't closed yet
+            closed_candles = []
+            for idx in df_features.index:
+                candle_open_time = pd.Timestamp(idx)
+                if candle_open_time.tz is None:
+                    candle_open_time = candle_open_time.tz_localize('UTC')
+                else:
+                    candle_open_time = candle_open_time.tz_convert('UTC')
+
+                candle_close_time = candle_open_time + pd.Timedelta(minutes=timeframe_minutes)
+
+                # Only include if candle has closed (with 10s margin)
+                if (now_utc - candle_close_time).total_seconds() >= -10:
+                    closed_candles.append(idx)
+
+            df_features = df_features.loc[closed_candles]
+
+            logger.info(f"   ✅ Features ready: {df_features.shape} (only closed candles)")
+            logger.info(f"   📍 Last closed candle: {df_features.index[-1]} | Close: ${df_features['close'].iloc[-1]:,.2f}")
             return df_features
 
         except Exception as e:
