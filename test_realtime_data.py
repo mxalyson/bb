@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.config import load_config
+from core.utils import load_config
 from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from datetime import datetime
