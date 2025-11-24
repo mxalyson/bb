@@ -920,6 +920,17 @@ class StrategyValidator:
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
 
+        # DEBUG: Log input DataFrame shape
+        logger.info(f"   📊 Input df shape at start of backtest: {df.shape}")
+        if df.empty or len(df) == 0:
+            logger.error(f"   ❌ DataFrame is EMPTY when received by backtest_with_confidence!")
+            logger.error(f"      This should not happen - df_features.copy() returned empty DataFrame")
+            return {
+                'error': 'Input DataFrame is empty',
+                'total_trades': 0,
+                'min_confidence': min_confidence
+            }
+
         # Add missing features if needed
         df = self._add_missing_features(df)
 
@@ -966,13 +977,25 @@ class StrategyValidator:
 
         df.loc[mask_long, 'signal'] = 1
         df.loc[mask_short, 'signal'] = -1
-        
+
+        # Check if we have any signals
+        num_signals = (df['signal'] != 0).sum()
+        logger.info(f"   📊 Signals generated: {num_signals} (Long: {(df['signal'] == 1).sum()}, Short: {(df['signal'] == -1).sum()})")
+
+        if num_signals == 0:
+            logger.info(f"   ⚠️  No signals meet confidence threshold {min_confidence:.0%}")
+            return {
+                'error': f'No signals with confidence >= {min_confidence:.0%}',
+                'total_trades': 0,
+                'min_confidence': min_confidence
+            }
+
         # Simulate
         trades = self._simulate(df)
-        
+
         # Stats
         stats = self._calculate_stats(trades, df, min_confidence)
-        
+
         return stats
     
     def _simulate(self, df: pd.DataFrame) -> List[Dict]:
@@ -1388,7 +1411,17 @@ def main():
 
                     # Run backtest
                     logger.info(f"   [{count:>2}/{total_configs}] Testing Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x...")
-                    stats = validator_grid.backtest_with_confidence(df_features.copy(), conf)
+
+                    # DEBUG: Check df_features before copy
+                    if df_features.empty or len(df_features) == 0:
+                        logger.error(f"      ❌ df_features is EMPTY before calling backtest!")
+                        logger.error(f"         df_features shape: {df_features.shape}")
+                        continue
+
+                    df_copy = df_features.copy()
+                    logger.info(f"      📊 df_copy shape: {df_copy.shape}")
+
+                    stats = validator_grid.backtest_with_confidence(df_copy, conf)
 
                     grid_results.append({
                         'conf': conf,
