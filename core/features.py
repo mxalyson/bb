@@ -8,7 +8,7 @@ from typing import Dict, Optional
 import logging
 
 from core.indicators import calculate_all_indicators
-from core.structure_pa_optimized import PriceActionAnalyzer
+from core.structure_pa import PriceActionAnalyzer
 
 logger = logging.getLogger("TradingBot.Features")
 
