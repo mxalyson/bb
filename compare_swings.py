@@ -10,10 +10,20 @@ import pandas as pd
 from core.structure_pa import PriceActionAnalyzer as OldAnalyzer
 from core.structure_pa_optimized import PriceActionAnalyzer as NewAnalyzer
 from core.data import DataManager
+from core.bybit_rest import BybitRESTClient
+from core.config import load_config
+
+# Load config and create Bybit client
+config = load_config('standard')
+rest_client = BybitRESTClient(
+    api_key=config['bybit_api_key'],
+    api_secret=config['bybit_api_secret'],
+    testnet=config['bybit_testnet']
+)
 
 # Download real data (1 day)
 print("📥 Downloading 1 day of BTCUSDT data...")
-data_manager = DataManager()
+data_manager = DataManager(rest_client)
 df = data_manager.get_data('BTCUSDT', '15m', 1, use_cache=False)
 print(f"   Got {len(df)} candles")
 print()
