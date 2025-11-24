@@ -1307,6 +1307,7 @@ def main():
     logger.info("🔨 Building features...")
     fs = FeatureStore(config)
     df_features = fs.build_features(df, normalize=False)
+    logger.info(f"   After build_features: {df_features.shape}")
 
     # Apply correct feature engineering based on model version
     if model_version == "Classical":
@@ -1324,7 +1325,15 @@ def main():
         df_features = create_advanced_features(df_features)
         df_features = create_advanced_features_v2(df_features)
 
-    logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
+    logger.info(f"✅ Features ready: shape={df_features.shape}, columns={len(df_features.columns)}")
+
+    # CRITICAL: Validate df_features is not empty
+    if df_features.empty or len(df_features) == 0:
+        logger.error(f"❌ df_features is EMPTY after creation!")
+        logger.error(f"   Shape: {df_features.shape}")
+        logger.error(f"   This is a critical bug - cannot continue")
+        return
+
     logger.info("")
 
     # Validate strategy
@@ -1372,6 +1381,13 @@ def main():
 
     grid_results = []
     count = 0
+
+    # DEBUG: Check df_features before loop starts
+    logger.info(f"🔍 df_features shape before grid search loop: {df_features.shape}")
+    if df_features.empty or len(df_features) == 0:
+        logger.error(f"❌ df_features is EMPTY before loop even starts!")
+        logger.error(f"   This should never happen - df_features was validated above")
+        return
 
     # Cache validators for each SL/TP combination (avoid reloading model)
     validators = {}
