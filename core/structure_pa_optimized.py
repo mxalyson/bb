@@ -34,20 +34,28 @@ class PriceActionAnalyzer:
 
         df = df.copy()
 
+        # DEBUG: Check input
+        logger.debug(f"   Input shape: {df.shape}")
+
         # Detect swing points (VECTORIZED)
         df = self._detect_swings_fast(df)
+        logger.debug(f"   After swings: {df.shape}, NaN cols: {df.columns[df.isnull().all()].tolist()}")
 
         # Identify market structure (VECTORIZED)
         df = self._identify_structure_fast(df)
+        logger.debug(f"   After structure: {df.shape}, NaN cols: {df.columns[df.isnull().all()].tolist()}")
 
         # Detect CHoCH and BOS (OPTIMIZED)
         df = self._detect_choch_bos_fast(df)
+        logger.debug(f"   After CHoCH/BOS: {df.shape}, NaN cols: {df.columns[df.isnull().all()].tolist()}")
 
         # Find FVG (Fair Value Gaps) - already fast
         df = self._find_fvg(df)
+        logger.debug(f"   After FVG: {df.shape}, NaN cols: {df.columns[df.isnull().all()].tolist()}")
 
         # Calculate S/R levels (VECTORIZED)
         df = self._calculate_sr_levels_fast(df)
+        logger.debug(f"   After S/R: {df.shape}, NaN cols: {df.columns[df.isnull().all()].tolist()}")
 
         logger.info("Price action structure analysis complete")
 
@@ -120,6 +128,10 @@ class PriceActionAnalyzer:
 
         # Forward fill trend
         df['trend'] = df['trend'].replace('neutral', np.nan).ffill().fillna('neutral')
+
+        # CRITICAL FIX: Remove temporary columns that have NaN in most rows
+        # These were causing dropna() to remove all rows in features.py
+        df = df.drop(columns=['swing_high_val', 'swing_low_val'], errors='ignore')
 
         return df
 

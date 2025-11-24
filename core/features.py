@@ -8,9 +8,8 @@ from typing import Dict, Optional
 import logging
 
 from core.indicators import calculate_all_indicators
-# TEMPORARY: Revert to original to debug empty DataFrame issue
-from core.structure_pa import PriceActionAnalyzer  # Original (slow but stable)
-# from core.structure_pa_optimized import PriceActionAnalyzer  # OPTIMIZED VERSION (100x faster)
+# BUG FIXED: swing_high_val/swing_low_val columns removed in structure_pa_optimized
+from core.structure_pa_optimized import PriceActionAnalyzer  # OPTIMIZED VERSION (100x faster - FIXED!)
 
 logger = logging.getLogger("TradingBot.Features")
 
