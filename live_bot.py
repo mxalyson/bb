@@ -714,6 +714,22 @@ class LiveTradingBot:
         self.feature_names = self.model_data['feature_names']
         self.optimal_threshold = self.model_data['optimal_threshold']
 
+        # Detect model version (same as 3.py)
+        v1_features = ['momentum_3', 'momentum_5', 'volume_ratio_3', 'price_position']
+        v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20']
+        classical_features = ['returns', 'log_returns', 'atr_14', 'rsi_14']
+
+        if any(f in self.feature_names for f in v1_features):
+            self.model_version = "V1"
+        elif any(f in self.feature_names for f in v2_features):
+            self.model_version = "V2"
+        elif any(f in self.feature_names for f in classical_features):
+            self.model_version = "Classical"
+        else:
+            self.model_version = "Unknown"
+
+        logger.info(f"📌 Detected model type: {self.model_version}")
+
         # Fetch market meta (tick size, qty step, min qty)
         logger.info("📊 Fetching market metadata...")
         try:
@@ -833,8 +849,19 @@ class LiveTradingBot:
             # Build features using FeatureStore
             df_features = self.feature_store.build_features(df, normalize=False)
 
-            # Create features matching training data
-            df_features = create_features_for_bot(df_features)
+            # Apply correct feature engineering based on model version (SAME AS 3.py!)
+            if self.model_version == "V1":
+                logger.info("   Applying V1 advanced features...")
+                df_features = create_features_for_bot(df_features)  # For V1, this is correct
+            elif self.model_version == "V2":
+                logger.warning("   ⚠️ V2 model detected - live_bot may not have all V2 features!")
+                df_features = create_features_for_bot(df_features)
+            elif self.model_version == "Classical":
+                logger.info("   Applying Classical features...")
+                df_features = create_features_for_bot(df_features)
+            else:
+                logger.warning(f"   ⚠️ Unknown model type - using default features")
+                df_features = create_features_for_bot(df_features)
 
             return df_features
 
