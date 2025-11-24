@@ -1610,10 +1610,10 @@ class LiveTradingBot:
                     # Get current data
                     df = self.get_current_data()
 
-                    # Get last CLOSED candle (penultimate = último fechado)
-                    # iloc[-1] = candle atual (incompleto)
-                    # iloc[-2] = último candle fechado ✅
-                    current = df.iloc[-2]
+                    # Get last CLOSED candle
+                    # CRITICAL: After dropna() in get_current_data(), ALL candles are valid and closed
+                    # So iloc[-1] is the most recent CLOSED candle with complete features ✅
+                    current = df.iloc[-1]
                     current_candle_time = current.name  # Candle timestamp
 
                     # DEBUG: Mostrar informações do candle
