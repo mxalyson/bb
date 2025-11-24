@@ -767,17 +767,12 @@ class StrategyValidator:
 
         # Validate input DataFrame
         if df.empty or len(df) == 0:
-            logger.error(f"❌ Input DataFrame is empty in _add_missing_features!")
-            logger.error(f"   df shape: {df.shape}")
             raise ValueError("Cannot add features to an empty DataFrame")
 
         missing = [f for f in self.feature_names if f not in df.columns]
 
         if not missing:
             return df
-
-        logger.info(f"   ⚠️  Missing {len(missing)} features, creating them...")
-        logger.info(f"   Input df shape: {df.shape}")
 
         # Create features based on model type
         if self.model_type == 'Ultra Scalper':
@@ -789,7 +784,6 @@ class StrategyValidator:
         elif self.model_type == 'Classical':
             df = create_classical_features(df)
         else:
-            logger.warning(f"   ⚠️  Unknown model type, trying all feature sets...")
             # Try creating all features
             df = create_classical_features(df)
             df = create_advanced_features(df)
@@ -798,17 +792,12 @@ class StrategyValidator:
 
         # Validate output DataFrame
         if df.empty or len(df) == 0:
-            logger.error(f"❌ DataFrame became empty after feature creation!")
-            logger.error(f"   Output df shape: {df.shape}")
             raise ValueError("Feature creation resulted in empty DataFrame")
-
-        logger.info(f"   Output df shape: {df.shape}")
 
         # Check if all features are now present
         still_missing = [f for f in self.feature_names if f not in df.columns]
         if still_missing:
-            logger.error(f"   ❌ Still missing {len(still_missing)} features: {still_missing[:10]}")
-            raise KeyError(f"Missing features after creation: {still_missing}")
+            raise KeyError(f"Missing features: {still_missing[:5]}")
 
         return df
 
@@ -920,11 +909,8 @@ class StrategyValidator:
     def backtest_with_confidence(self, df: pd.DataFrame, min_confidence: float) -> Dict:
         """Run backtest com filtro de confiança mínima."""
 
-        # DEBUG: Log input DataFrame shape
-        logger.info(f"   📊 Input df shape at start of backtest: {df.shape}")
+        # Validate input
         if df.empty or len(df) == 0:
-            logger.error(f"   ❌ DataFrame is EMPTY when received by backtest_with_confidence!")
-            logger.error(f"      This should not happen - df_features.copy() returned empty DataFrame")
             return {
                 'error': 'Input DataFrame is empty',
                 'total_trades': 0,
@@ -941,16 +927,12 @@ class StrategyValidator:
         X = X.replace([np.inf, -np.inf], 0)
 
         # Validate X before prediction
-        if X.empty:
-            logger.error(f"❌ DataFrame X is empty after feature selection!")
-            logger.error(f"   df shape: {df.shape}")
-            logger.error(f"   df columns: {len(df.columns)}")
-            logger.error(f"   Required features: {len(self.feature_names)}")
-            raise ValueError("Feature DataFrame is empty - cannot make predictions")
-
-        if len(X) == 0:
-            logger.error(f"❌ DataFrame X has no rows!")
-            raise ValueError("Feature DataFrame has no rows - cannot make predictions")
+        if X.empty or len(X) == 0:
+            return {
+                'error': 'No data for predictions',
+                'total_trades': 0,
+                'min_confidence': min_confidence
+            }
 
         # Try to predict - model could be a wrapper with custom predict
         try:
@@ -980,10 +962,8 @@ class StrategyValidator:
 
         # Check if we have any signals
         num_signals = (df['signal'] != 0).sum()
-        logger.info(f"   📊 Signals generated: {num_signals} (Long: {(df['signal'] == 1).sum()}, Short: {(df['signal'] == -1).sum()})")
 
         if num_signals == 0:
-            logger.info(f"   ⚠️  No signals meet confidence threshold {min_confidence:.0%}")
             return {
                 'error': f'No signals with confidence >= {min_confidence:.0%}',
                 'total_trades': 0,
@@ -1393,35 +1373,35 @@ def main():
     grid_results = []
     count = 0
 
+    # Cache validators for each SL/TP combination (avoid reloading model)
+    validators = {}
+
     for conf in confidence_levels:
         for sl in sl_mults:
             for tp in tp_mults:
                 count += 1
 
                 try:
-                    # Create validator with specific ATR settings
-                    validator_grid = StrategyValidator(
-                        config,
-                        model_path,
-                        verbose_trades=False,
-                        fee_type=args.fee_type,
-                        sl_atr_mult=sl,
-                        tp_atr_mult=tp
-                    )
+                    # Get or create validator for this SL/TP combination
+                    validator_key = (sl, tp)
+                    if validator_key not in validators:
+                        validators[validator_key] = StrategyValidator(
+                            config,
+                            model_path,
+                            verbose_trades=False,
+                            fee_type=args.fee_type,
+                            sl_atr_mult=sl,
+                            tp_atr_mult=tp
+                        )
+                    validator_grid = validators[validator_key]
+
+                    # Check df_features integrity
+                    if df_features.empty or len(df_features) == 0:
+                        logger.error(f"   [{count:>2}/{total_configs}] ❌ df_features corrupted - skipping remaining configs")
+                        break
 
                     # Run backtest
-                    logger.info(f"   [{count:>2}/{total_configs}] Testing Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x...")
-
-                    # DEBUG: Check df_features before copy
-                    if df_features.empty or len(df_features) == 0:
-                        logger.error(f"      ❌ df_features is EMPTY before calling backtest!")
-                        logger.error(f"         df_features shape: {df_features.shape}")
-                        continue
-
-                    df_copy = df_features.copy()
-                    logger.info(f"      📊 df_copy shape: {df_copy.shape}")
-
-                    stats = validator_grid.backtest_with_confidence(df_copy, conf)
+                    stats = validator_grid.backtest_with_confidence(df_features.copy(), conf)
 
                     grid_results.append({
                         'conf': conf,
@@ -1439,14 +1419,15 @@ def main():
                         'short_loss': stats.get('short_loss', 0)
                     })
 
-                    logger.info(f"      ✅ {stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
+                    # Log result
+                    trades = stats.get('total_trades', 0)
+                    if trades > 0:
+                        logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x → {trades} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
+                    else:
+                        logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x → No trades")
 
                 except Exception as e:
-                    logger.error(f"      ❌ FAILED: Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x")
-                    logger.error(f"         Error: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    # Continue with next configuration
+                    logger.error(f"   [{count:>2}/{total_configs}] ❌ Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x - {str(e)[:50]}")
                     continue
 
     # Display ALL results
