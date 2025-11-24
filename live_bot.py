@@ -1007,6 +1007,10 @@ class LiveTradingBot:
                 if (now_utc - candle_close_time).total_seconds() >= -10:
                     closed_candles.append(idx)
 
+            # Validate we have at least one closed candle
+            if not closed_candles:
+                raise ValueError(f"No closed candles found! This should never happen with 30 days of data. Now: {now_utc}")
+
             df_features = df_features.loc[closed_candles]
 
             logger.info(f"   ✅ Features ready: {df_features.shape} (only closed candles)")
