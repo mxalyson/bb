@@ -28,27 +28,123 @@ from core.data import DataManager
 from core.features import FeatureStore
 from decimal import Decimal, ROUND_DOWN, getcontext
 
-# Import feature creation functions from 3.py (CRITICAL - same features as backtest!)
-import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    # Try to import from 3.py module namespace
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("backtest", "3.py")
-    backtest_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backtest_module)
-    create_advanced_features = backtest_module.create_advanced_features
-    create_advanced_features_v2 = backtest_module.create_advanced_features_v2
-    create_classical_features = backtest_module.create_classical_features
-except Exception as e:
-    logger.warning(f"Could not import from 3.py: {e}")
-    # Fallback: define minimal versions
-    def create_advanced_features(df):
-        return df
-    def create_advanced_features_v2(df):
-        return df
-    def create_classical_features(df):
-        return df
+# =============================================================================
+# FEATURE FUNCTIONS (COPIED FROM 3.py - EXACT SAME AS BACKTEST!)
+# =============================================================================
+
+def create_classical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Classical features (from 3.py)"""
+    df_feat = df.copy()
+    df_feat['returns'] = df_feat['close'].pct_change()
+    df_feat['log_returns'] = np.log(df_feat['close'] / df_feat['close'].shift(1))
+    df_feat['volatility'] = df_feat['returns'].rolling(20).std()
+    df_feat['volatility_30'] = df_feat['returns'].rolling(30).std()
+
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = np.abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = np.abs(df_feat['low'] - df_feat['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    df_feat['atr_14'] = true_range.rolling(14).mean()
+    df_feat['atr_20'] = true_range.rolling(20).mean()
+
+    for period in [7, 14, 21, 50, 100, 200]:
+        df_feat[f'sma_{period}'] = df_feat['close'].rolling(period).mean()
+        df_feat[f'ema_{period}'] = df_feat['close'].ewm(span=period, adjust=False).mean()
+
+    df_feat['price_vs_sma50'] = (df_feat['close'] - df_feat['sma_50']) / df_feat['sma_50'] * 100
+    df_feat['price_vs_sma200'] = (df_feat['close'] - df_feat['sma_200']) / df_feat['sma_200'] * 100
+
+    for period in [10, 20, 30]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    df_feat['roc_30'] = ((df_feat['close'] - df_feat['close'].shift(30)) / df_feat['close'].shift(30)) * 100
+
+    delta = df_feat['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10)
+    df_feat['rsi_14'] = 100 - (100 / (1 + rs))
+
+    rsi = df_feat['rsi_14']
+    rsi_low = rsi.rolling(14).min()
+    rsi_high = rsi.rolling(14).max()
+    df_feat['stoch_rsi'] = ((rsi - rsi_low) / (rsi_high - rsi_low + 1e-10)) * 100
+
+    df_feat['volume_sma'] = df_feat['volume'].rolling(20).mean()
+    df_feat['volume_roc'] = df_feat['volume'].pct_change(10) * 100
+
+    df_feat['high_20'] = df_feat['high'].rolling(20).max()
+    df_feat['low_20'] = df_feat['low'].rolling(20).min()
+    df_feat['channel_pos'] = ((df_feat['close'] - df_feat['low_20']) /
+                              (df_feat['high_20'] - df_feat['low_20'] + 1e-10)) * 100
+    return df_feat
+
+
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """V1 features (from 3.py) - YOUR MODEL USES THIS!"""
+    df_features = df.copy()
+
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    return df_features
+
+
+def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """V2 features (from 3.py)"""
+    df_features = df.copy()
+
+    for period in [3, 5, 8, 13, 21, 34]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+    df_features['volatility_regime'] = df_features['atr'] / df_features['atr'].rolling(50).mean()
+
+    for period in [10, 20, 50]:
+        high_period = df_features['high'].rolling(period).max()
+        low_period = df_features['low'].rolling(period).min()
+        df_features[f'price_position_{period}'] = (
+            (df_features['close'] - low_period) / (high_period - low_period + 1e-8)
+        )
+
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    for period in [10, 20, 50]:
+        returns = df_features['close'].pct_change()
+        df_features[f'returns_skew_{period}'] = returns.rolling(period).skew()
+        df_features[f'returns_kurt_{period}'] = returns.rolling(period).kurt()
+        df_features[f'returns_std_{period}'] = returns.rolling(period).std()
+
+    for period in [5, 10, 20]:
+        df_features[f'roc_{period}'] = (
+            (df_features['close'] - df_features['close'].shift(period)) /
+            df_features['close'].shift(period) * 100
+        )
+
+    for period in [20, 50]:
+        sma = df_features['close'].rolling(period).mean()
+        std = df_features['close'].rolling(period).std()
+        df_features[f'bb_width_{period}'] = (4 * std) / sma * 100
+
+    return df_features
 
 # Load environment variables
 load_dotenv()
