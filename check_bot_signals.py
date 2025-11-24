@@ -53,18 +53,25 @@ if isinstance(data, dict):
     print("   Format: dict")
     print(f"   Keys: {list(data.keys())}")
     actual_model = data.get('model')
+    feature_names = data.get('feature_names') or data.get('features')
     threshold = data.get('optimal_threshold', 0.5)
 else:
     print("   Format: object")
     actual_model = getattr(data, 'model', data)
+    feature_names = getattr(data, 'feature_names', None)
     threshold = getattr(data, 'optimal_threshold', 0.5)
 
 print(f"   Threshold: {threshold:.3f}")
-print(f"   Model type: {type(actual_model)}\n")
+print(f"   Model type: {type(actual_model)}")
+print(f"   Features: {len(feature_names) if feature_names else 'unknown'}\n")
 
-# Get features
-feature_cols = [c for c in df_feat.columns if c not in ['signal', 'ml_prob_up', 'ml_prob_down', 'ml_confidence']]
-X = df_feat[feature_cols].values
+# Get features using model's feature_names (CRITICAL - avoids 'trend' string issue!)
+if feature_names:
+    X = df_feat[feature_names].fillna(0).replace([np.inf, -np.inf], 0).values
+else:
+    # Fallback: exclude known non-numeric columns
+    feature_cols = [c for c in df_feat.columns if c not in ['signal', 'ml_prob_up', 'ml_prob_down', 'ml_confidence', 'trend']]
+    X = df_feat[feature_cols].fillna(0).replace([np.inf, -np.inf], 0).values
 
 # Predict
 print("🔮 Predicting...")
