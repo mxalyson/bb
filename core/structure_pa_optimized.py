@@ -54,16 +54,22 @@ class PriceActionAnalyzer:
         return df
 
     def _detect_swings_fast(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Detect swing highs and lows using rolling windows (VECTORIZED)."""
+        """Detect swing highs and lows using rolling windows (VECTORIZED - FIXED)."""
         lookback = self.swing_lookback
 
-        # Use rolling max/min to find local peaks
-        # Swing high: higher than lookback bars before AND after
+        # BEFORE: Easy - shift(1) then rolling backward
         high_rolled_before = df['high'].shift(1).rolling(window=lookback, min_periods=lookback).max()
-        high_rolled_after = df['high'].shift(-1).rolling(window=lookback, min_periods=lookback).max()
-
         low_rolled_before = df['low'].shift(1).rolling(window=lookback, min_periods=lookback).min()
-        low_rolled_after = df['low'].shift(-1).rolling(window=lookback, min_periods=lookback).min()
+
+        # AFTER: Trick - reverse series, rolling backward, reverse back
+        # This correctly implements "look ahead" in a vectorized way
+        high_reversed = df['high'].iloc[::-1]  # Reverse
+        high_rolled_after_reversed = high_reversed.shift(1).rolling(window=lookback, min_periods=lookback).max()
+        high_rolled_after = high_rolled_after_reversed.iloc[::-1]  # Reverse back
+
+        low_reversed = df['low'].iloc[::-1]  # Reverse
+        low_rolled_after_reversed = low_reversed.shift(1).rolling(window=lookback, min_periods=lookback).min()
+        low_rolled_after = low_rolled_after_reversed.iloc[::-1]  # Reverse back
 
         # Swing high: current high > max of lookback bars before AND after
         df['swing_high'] = (df['high'] > high_rolled_before) & (df['high'] > high_rolled_after)
