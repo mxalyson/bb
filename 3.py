@@ -674,8 +674,8 @@ def create_ultra_scalper_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat['spread_proxy'] = (df_feat['high'] - df_feat['low']) / df_feat['close'] * 100
     df_feat['spread_ma'] = df_feat['spread_proxy'].rolling(20).mean()
 
-    # Fill NaN
-    df_feat = df_feat.fillna(method='ffill').fillna(method='bfill').fillna(0)
+    # Fill NaN (use ffill() instead of fillna(method='ffill') for pandas 2.0+)
+    df_feat = df_feat.ffill().bfill().fillna(0)
 
     # Ultra scalper features created
 
@@ -764,12 +764,20 @@ class StrategyValidator:
 
     def _add_missing_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add missing features based on model type."""
+
+        # Validate input DataFrame
+        if df.empty or len(df) == 0:
+            logger.error(f"❌ Input DataFrame is empty in _add_missing_features!")
+            logger.error(f"   df shape: {df.shape}")
+            raise ValueError("Cannot add features to an empty DataFrame")
+
         missing = [f for f in self.feature_names if f not in df.columns]
 
         if not missing:
             return df
 
         logger.info(f"   ⚠️  Missing {len(missing)} features, creating them...")
+        logger.info(f"   Input df shape: {df.shape}")
 
         # Create features based on model type
         if self.model_type == 'Ultra Scalper':
@@ -787,6 +795,14 @@ class StrategyValidator:
             df = create_advanced_features(df)
             df = create_advanced_features_v2(df)
             df = create_ultra_scalper_features(df)
+
+        # Validate output DataFrame
+        if df.empty or len(df) == 0:
+            logger.error(f"❌ DataFrame became empty after feature creation!")
+            logger.error(f"   Output df shape: {df.shape}")
+            raise ValueError("Feature creation resulted in empty DataFrame")
+
+        logger.info(f"   Output df shape: {df.shape}")
 
         # Check if all features are now present
         still_missing = [f for f in self.feature_names if f not in df.columns]
@@ -912,6 +928,18 @@ class StrategyValidator:
 
         # Replace inf values
         X = X.replace([np.inf, -np.inf], 0)
+
+        # Validate X before prediction
+        if X.empty:
+            logger.error(f"❌ DataFrame X is empty after feature selection!")
+            logger.error(f"   df shape: {df.shape}")
+            logger.error(f"   df columns: {len(df.columns)}")
+            logger.error(f"   Required features: {len(self.feature_names)}")
+            raise ValueError("Feature DataFrame is empty - cannot make predictions")
+
+        if len(X) == 0:
+            logger.error(f"❌ DataFrame X has no rows!")
+            raise ValueError("Feature DataFrame has no rows - cannot make predictions")
 
         # Try to predict - model could be a wrapper with custom predict
         try:
@@ -1347,36 +1375,46 @@ def main():
             for tp in tp_mults:
                 count += 1
 
-                # Create validator with specific ATR settings
-                validator_grid = StrategyValidator(
-                    config,
-                    model_path,
-                    verbose_trades=False,
-                    fee_type=args.fee_type,
-                    sl_atr_mult=sl,
-                    tp_atr_mult=tp
-                )
+                try:
+                    # Create validator with specific ATR settings
+                    validator_grid = StrategyValidator(
+                        config,
+                        model_path,
+                        verbose_trades=False,
+                        fee_type=args.fee_type,
+                        sl_atr_mult=sl,
+                        tp_atr_mult=tp
+                    )
 
-                # Run backtest
-                stats = validator_grid.backtest_with_confidence(df_features.copy(), conf)
+                    # Run backtest
+                    logger.info(f"   [{count:>2}/{total_configs}] Testing Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x...")
+                    stats = validator_grid.backtest_with_confidence(df_features.copy(), conf)
 
-                grid_results.append({
-                    'conf': conf,
-                    'sl': sl,
-                    'tp': tp,
-                    'trades': stats.get('total_trades', 0),
-                    'wr': stats.get('win_rate', 0),
-                    'roi': stats.get('roi', 0),
-                    'sharpe': stats.get('sharpe_ratio', 0),
-                    'pf': stats.get('profit_factor', 0),
-                    'dd': stats.get('max_drawdown', 0),
-                    'long_win': stats.get('long_win', 0),
-                    'long_loss': stats.get('long_loss', 0),
-                    'short_win': stats.get('short_win', 0),
-                    'short_loss': stats.get('short_loss', 0)
-                })
+                    grid_results.append({
+                        'conf': conf,
+                        'sl': sl,
+                        'tp': tp,
+                        'trades': stats.get('total_trades', 0),
+                        'wr': stats.get('win_rate', 0),
+                        'roi': stats.get('roi', 0),
+                        'sharpe': stats.get('sharpe_ratio', 0),
+                        'pf': stats.get('profit_factor', 0),
+                        'dd': stats.get('max_drawdown', 0),
+                        'long_win': stats.get('long_win', 0),
+                        'long_loss': stats.get('long_loss', 0),
+                        'short_win': stats.get('short_win', 0),
+                        'short_loss': stats.get('short_loss', 0)
+                    })
 
-                logger.info(f"   [{count:>2}/{total_configs}] Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x → {stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
+                    logger.info(f"      ✅ {stats.get('total_trades', 0)} trades, {stats.get('win_rate', 0)*100:.0f}% WR, {stats.get('roi', 0):+.2f}% ROI")
+
+                except Exception as e:
+                    logger.error(f"      ❌ FAILED: Conf={conf:>4.0%}, SL={sl:.1f}x, TP={tp:.1f}x")
+                    logger.error(f"         Error: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue with next configuration
+                    continue
 
     # Display ALL results
     logger.info("")
@@ -1384,6 +1422,12 @@ def main():
     logger.info("📊 TODAS AS CONFIGURAÇÕES TESTADAS (por ROI)")
     logger.info("=" * 140)
     logger.info("")
+
+    # Check if we have any results
+    if not grid_results:
+        logger.error("❌ No configurations completed successfully!")
+        logger.error("   All grid search configurations failed.")
+        return
 
     # Sort by ROI
     grid_sorted = sorted(grid_results, key=lambda x: x['roi'], reverse=True)
