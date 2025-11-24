@@ -1317,8 +1317,23 @@ def main():
     logger.info("=" * 80)
     logger.info("")
 
-    # Grid parameters
-    confidence_levels = [0.0, 0.25, 0.40, 0.50, 0.60]
+    # Grid parameters - EXPANDED confidence range
+    confidence_levels = [
+        0.0,   # Sem filtro
+        0.10,  # 10%
+        0.15,  # 15%
+        0.20,  # 20%
+        0.25,  # 25%
+        0.30,  # 30%
+        0.35,  # 35%
+        0.40,  # 40%
+        0.45,  # 45%
+        0.50,  # 50%
+        0.55,  # 55%
+        0.60,  # 60%
+        0.65,  # 65%
+        0.70,  # 70%
+    ]
     sl_mults = [1.5, 2.0]
     tp_mults = [0.7, 1.0, 1.2]
 
