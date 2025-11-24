@@ -983,15 +983,8 @@ class LiveTradingBot:
                 df_features = create_advanced_features(df_features)
                 df_features = create_advanced_features_v2(df_features)
 
-            # CRITICAL: Drop NaN rows AGAIN after adding V1 features
-            # Some V1 features may create NaN in recent candles
-            before_final_dropna = len(df_features)
-            df_features = df_features.dropna()
-            after_final_dropna = len(df_features)
-
-            if before_final_dropna != after_final_dropna:
-                logger.warning(f"   ⚠️ Removed {before_final_dropna - after_final_dropna} rows with NaN after V1 features")
-
+            # NOTE: 3.py does NOT do dropna() after V1 features
+            # FeatureStore already did dropna(), and make_prediction() will handle NaN if needed
             logger.info(f"   ✅ Features ready: {df_features.shape}")
             logger.info(f"   📍 Last candle: {df_features.index[-1]} | Close: ${df_features['close'].iloc[-1]:,.2f}")
             return df_features
@@ -1577,7 +1570,7 @@ class LiveTradingBot:
                             exit_price, reason = result
                             # Get current candle for timestamp (apenas 1 dia, muito mais leve)
                             df_light = self.data_manager.get_data(self.symbol, f'{self.timeframe}m', 1, False)
-                            current = df_light.iloc[-2]
+                            current = df_light.iloc[-1]  # Last candle (without full features, just for timestamp)
                             self.close_position(current, reason, close=exit_price)
 
                         # Sleep maior quando tem posição (só monitora SL/TP)
@@ -1682,8 +1675,26 @@ class LiveTradingBot:
                     try:
                         logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
 
-                        # Get prediction for ONLY the last closed candle (iloc[-2])
-                        df_single = df.iloc[[-2]].copy()
+                        # Get prediction for ONLY the last closed candle (iloc[-1])
+                        # CRITICAL: Must match the 'current' variable we're analyzing
+                        df_single = df.iloc[[-1]].copy()
+
+                        # CRITICAL: Check if last candle has NaN in required features
+                        missing_features = [f for f in self.feature_names if f not in df_single.columns]
+                        if missing_features:
+                            logger.error(f"❌ Missing features in last candle: {missing_features[:5]}...")
+                            logger.info("⏭️ Skipping this candle - waiting for next one")
+                            time.sleep(5)
+                            continue
+
+                        # Check for NaN in required features
+                        nan_features = df_single[self.feature_names].isnull().any()
+                        if nan_features.any():
+                            nan_list = nan_features[nan_features].index.tolist()
+                            logger.warning(f"⚠️ Last candle has NaN in {len(nan_list)} features: {nan_list[:5]}...")
+                            logger.info("⏭️ Skipping this candle - waiting for complete data")
+                            time.sleep(5)
+                            continue
 
                         predictions = make_prediction(
                             self.model,
