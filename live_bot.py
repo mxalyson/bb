@@ -1003,8 +1003,9 @@ class LiveTradingBot:
 
                 candle_close_time = candle_open_time + pd.Timedelta(minutes=timeframe_minutes)
 
-                # Only include if candle has closed (with 10s margin)
-                if (now_utc - candle_close_time).total_seconds() >= -10:
+                # Only include if candle has ACTUALLY closed
+                # Use positive margin (10s) to ensure candle closed and data is available
+                if (now_utc - candle_close_time).total_seconds() >= 10:
                     closed_candles.append(idx)
 
             # Validate we have at least one closed candle
@@ -1669,13 +1670,18 @@ class LiveTradingBot:
                     # DEBUG: Show timezone comparison
                     logger.info(f"🔍 Candle close: {candle_close_time} | Now UTC: {now_utc} | Diff: {seconds_since_candle_close:.0f}s")
 
-                    # For 15min timeframe (900s), candle is "fresh" if closed within last 90s (1.5min)
-                    # OR if seconds_since_candle_close is NEGATIVE (candle hasn't closed yet)
+                    # SAFETY CHECKS (redundant with filter in get_current_data but good to have)
+                    # These should never trigger because filter ensures candle closed >= 10s ago
                     max_candle_age = 90  # 90 seconds
 
-                    if seconds_since_candle_close < -60:
-                        # Candle closes in future (> 60s away) - too early
-                        logger.info(f"⏭️ Candle ainda não fechou (falta {-seconds_since_candle_close:.0f}s) - aguardando")
+                    if seconds_since_candle_close < 0:
+                        # Should NEVER happen - filter already removed incomplete candles
+                        logger.warning(f"⚠️ UNEXPECTED: Candle hasn't closed! (diff={seconds_since_candle_close:.0f}s)")
+                        time.sleep(5)
+                        continue
+                    elif seconds_since_candle_close < 10:
+                        # Should NEVER happen - filter requires >= 10s
+                        logger.warning(f"⚠️ UNEXPECTED: Candle too fresh! (diff={seconds_since_candle_close:.0f}s)")
                         time.sleep(5)
                         continue
                     elif seconds_since_candle_close > max_candle_age:
