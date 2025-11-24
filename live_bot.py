@@ -983,7 +983,17 @@ class LiveTradingBot:
                 df_features = create_advanced_features(df_features)
                 df_features = create_advanced_features_v2(df_features)
 
+            # CRITICAL: Drop NaN rows AGAIN after adding V1 features
+            # Some V1 features may create NaN in recent candles
+            before_final_dropna = len(df_features)
+            df_features = df_features.dropna()
+            after_final_dropna = len(df_features)
+
+            if before_final_dropna != after_final_dropna:
+                logger.warning(f"   ⚠️ Removed {before_final_dropna - after_final_dropna} rows with NaN after V1 features")
+
             logger.info(f"   ✅ Features ready: {df_features.shape}")
+            logger.info(f"   📍 Last candle: {df_features.index[-1]} | Close: ${df_features['close'].iloc[-1]:,.2f}")
             return df_features
 
         except Exception as e:
