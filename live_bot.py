@@ -28,6 +28,28 @@ from core.data import DataManager
 from core.features import FeatureStore
 from decimal import Decimal, ROUND_DOWN, getcontext
 
+# Import feature creation functions from 3.py (CRITICAL - same features as backtest!)
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    # Try to import from 3.py module namespace
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("backtest", "3.py")
+    backtest_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backtest_module)
+    create_advanced_features = backtest_module.create_advanced_features
+    create_advanced_features_v2 = backtest_module.create_advanced_features_v2
+    create_classical_features = backtest_module.create_classical_features
+except Exception as e:
+    logger.warning(f"Could not import from 3.py: {e}")
+    # Fallback: define minimal versions
+    def create_advanced_features(df):
+        return df
+    def create_advanced_features_v2(df):
+        return df
+    def create_classical_features(df):
+        return df
+
 # Load environment variables
 load_dotenv()
 
@@ -849,20 +871,23 @@ class LiveTradingBot:
             # Build features using FeatureStore
             df_features = self.feature_store.build_features(df, normalize=False)
 
-            # Apply correct feature engineering based on model version (SAME AS 3.py!)
-            if self.model_version == "V1":
-                logger.info("   Applying V1 advanced features...")
-                df_features = create_features_for_bot(df_features)  # For V1, this is correct
+            # Apply correct feature engineering based on model version (EXACTLY SAME AS 3.py!)
+            if self.model_version == "Classical":
+                logger.info("   Applying Classical TA features...")
+                df_features = create_classical_features(df_features)
             elif self.model_version == "V2":
-                logger.warning("   ⚠️ V2 model detected - live_bot may not have all V2 features!")
-                df_features = create_features_for_bot(df_features)
-            elif self.model_version == "Classical":
-                logger.info("   Applying Classical features...")
-                df_features = create_features_for_bot(df_features)
+                logger.info("   Applying V2 advanced features...")
+                df_features = create_advanced_features_v2(df_features)
+            elif self.model_version == "V1":
+                logger.info("   Applying V1 advanced features...")
+                df_features = create_advanced_features(df_features)
             else:
-                logger.warning(f"   ⚠️ Unknown model type - using default features")
-                df_features = create_features_for_bot(df_features)
+                logger.warning(f"   ⚠️ Unknown model type - trying all features...")
+                df_features = create_classical_features(df_features)
+                df_features = create_advanced_features(df_features)
+                df_features = create_advanced_features_v2(df_features)
 
+            logger.info(f"   ✅ Features ready: {df_features.shape}")
             return df_features
 
         except Exception as e:
