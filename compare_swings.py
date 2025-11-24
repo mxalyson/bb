@@ -11,7 +11,7 @@ from core.structure_pa import PriceActionAnalyzer as OldAnalyzer
 from core.structure_pa_optimized import PriceActionAnalyzer as NewAnalyzer
 from core.data import DataManager
 from core.bybit_rest import BybitRESTClient
-from core.config import load_config
+from core.utils import load_config
 
 # Load config and create Bybit client
 config = load_config('standard')
