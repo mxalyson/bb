@@ -40,9 +40,10 @@ print()
 
 # Load model
 print("🤖 Loading ML model...")
-with open('ml_model_master_scalper_365d.pkl', 'rb') as f:
+model_path = 'storage/models/ml_model_master_scalper_365d.pkl'
+with open(model_path, 'rb') as f:
     model = pickle.load(f)
-print("   Model loaded!")
+print(f"   Model loaded from: {model_path}")
 print()
 
 # Get feature columns (same as training)
