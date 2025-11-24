@@ -105,14 +105,31 @@ except Exception as e:
     sys.exit(1)
 print()
 
-# Load model
+# Load model (same as 3.py - handle ensemble models)
 print("🤖 Loading ML model...")
 try:
     with open(model_path, 'rb') as f:
-        model = pickle.load(f)
-    print("✅ Model loaded")
+        model_data = pickle.load(f)
+
+    # Extract model and metadata
+    if isinstance(model_data, dict):
+        model = model_data.get('model')
+        feature_names = model_data.get('feature_names') or model_data.get('features')
+        optimal_threshold = model_data.get('optimal_threshold', 0.5)
+        print(f"✅ Model loaded (dict format)")
+        print(f"   Keys: {list(model_data.keys())}")
+    else:
+        # Object format
+        model = getattr(model_data, 'model', model_data)
+        feature_names = getattr(model_data, 'feature_names', None)
+        optimal_threshold = getattr(model_data, 'optimal_threshold', 0.5)
+        print(f"✅ Model loaded (object format)")
+
+    print(f"   Optimal threshold: {optimal_threshold:.3f}")
 except Exception as e:
     print(f"❌ ERROR loading model: {e}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 print()
 
@@ -120,11 +137,39 @@ print()
 feature_cols = [c for c in df_feat.columns if c not in ['signal', 'ml_prob_up', 'ml_prob_down', 'ml_confidence']]
 X = df_feat[feature_cols].values
 
-# Make predictions
+# Make predictions (try multiple methods like 3.py)
 print("🔮 Making predictions...")
 try:
-    ml_probs = model.predict(X)
-    print(f"✅ Predictions made: {len(ml_probs)} rows")
+    # Method 1: Try direct predict
+    try:
+        ml_probs = model.predict(X)
+        print(f"✅ Predictions made using model.predict(): {len(ml_probs)} rows")
+    except AttributeError:
+        # Method 2: Try callable
+        try:
+            ml_probs = model(X)
+            print(f"✅ Predictions made using model(): {len(ml_probs)} rows")
+        except:
+            # Method 3: Ensemble wrapper
+            if hasattr(model, 'models_list'):
+                print(f"   🔄 Detected ensemble model, using weighted predictions...")
+                predictions = []
+                for m in model.models_list:
+                    pred = m.predict(X)
+                    predictions.append(pred)
+
+                if hasattr(model, 'model_weights'):
+                    weights = model.model_weights
+                    ml_probs = np.zeros_like(predictions[0])
+                    for pred, weight in zip(predictions, weights):
+                        ml_probs += pred * weight
+                else:
+                    ml_probs = np.mean(predictions, axis=0)
+
+                print(f"✅ Predictions made using ensemble: {len(ml_probs)} rows")
+            else:
+                raise ValueError("Model has no predict() method or callable interface")
+
 except Exception as e:
     print(f"❌ ERROR making predictions: {e}")
     import traceback
@@ -133,7 +178,7 @@ except Exception as e:
 print()
 
 # Analyze signals for different confidence thresholds
-optimal_threshold = 0.5
+# Use optimal_threshold from model (already loaded above)
 thresholds = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
 
 print("=" * 80)
