@@ -211,14 +211,19 @@ class TelegramNotifier:
                 "🤖 <b>Comandos Disponíveis:</b>\n\n"
                 "<b>📊 Informações:</b>\n"
                 "/status - Status geral do bot\n"
+                "/config - Ver todas configurações\n"
                 "/position - Posição aberta atual\n"
                 "/capital - Capital atual\n\n"
                 "<b>⚙️ Controle:</b>\n"
                 "/pause - Pausar bot (não abre novos trades)\n"
-                "/resume - Retomar bot\n\n"
+                "/resume - Retomar bot\n"
+                "/forcecheck - Forçar verificação de novo candle\n\n"
                 "<b>🔧 Configuração:</b>\n"
-                "/setconf &lt;0-100&gt; - Mudar confiança mínima (%)\n"
-                "/setrisk &lt;0.1-2.0&gt; - Mudar risco por trade (%)"
+                "/setconf &lt;0-100&gt; - Confiança mínima (%)\n"
+                "/setrisk &lt;0.1-2.0&gt; - Risco por trade (%)\n"
+                "/setsl &lt;1-10&gt; - Stop Loss (x ATR)\n"
+                "/settp &lt;1-20&gt; - Take Profit (x ATR)\n"
+                "/setcooldown &lt;5-120&gt; - Cooldown entre trades (min)"
             )
 
         # Status command
@@ -351,6 +356,86 @@ class TelegramNotifier:
                 return f"✅ <b>Risco Atualizado</b>\n\n{old_risk:.2f}% → {new_risk:.2f}%"
             except ValueError:
                 return "❌ Valor inválido. Use um número entre 0.1 e 2.0."
+
+        # Set SL command
+        elif command == "/setsl":
+            if not args:
+                return "❌ Uso: /setsl &lt;valor&gt;\n\nExemplo: /setsl 3.5"
+
+            try:
+                new_sl = float(args[0])
+                if not (1.0 <= new_sl <= 10.0):
+                    return "❌ SL deve estar entre 1.0 e 10.0 (x ATR)"
+
+                old_sl = bot.sl_atr_mult
+                bot.sl_atr_mult = new_sl
+                logger.info(f"⚙️ SL alterado via Telegram: {old_sl:.1f}x → {new_sl:.1f}x ATR")
+
+                return f"✅ <b>Stop Loss Atualizado</b>\n\n{old_sl:.1f}x → {new_sl:.1f}x ATR"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 1.0 e 10.0."
+
+        # Set TP command
+        elif command == "/settp":
+            if not args:
+                return "❌ Uso: /settp &lt;valor&gt;\n\nExemplo: /settp 5.0"
+
+            try:
+                new_tp = float(args[0])
+                if not (1.0 <= new_tp <= 20.0):
+                    return "❌ TP deve estar entre 1.0 e 20.0 (x ATR)"
+
+                old_tp = bot.tp_atr_mult
+                bot.tp_atr_mult = new_tp
+                logger.info(f"⚙️ TP alterado via Telegram: {old_tp:.1f}x → {new_tp:.1f}x ATR")
+
+                return f"✅ <b>Take Profit Atualizado</b>\n\n{old_tp:.1f}x → {new_tp:.1f}x ATR"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 1.0 e 20.0."
+
+        # Set cooldown command
+        elif command == "/setcooldown":
+            if not args:
+                return "❌ Uso: /setcooldown &lt;minutos&gt;\n\nExemplo: /setcooldown 30"
+
+            try:
+                new_cooldown_min = int(args[0])
+                if not (5 <= new_cooldown_min <= 120):
+                    return "❌ Cooldown deve estar entre 5 e 120 minutos"
+
+                old_cooldown_min = bot.trade_cooldown / 60
+                bot.trade_cooldown = new_cooldown_min * 60
+                logger.info(f"⚙️ Cooldown alterado via Telegram: {old_cooldown_min:.0f}min → {new_cooldown_min}min")
+
+                return f"✅ <b>Cooldown Atualizado</b>\n\n{old_cooldown_min:.0f}min → {new_cooldown_min}min"
+            except ValueError:
+                return "❌ Valor inválido. Use um número inteiro entre 5 e 120."
+
+        # Config command - show all settings
+        elif command == "/config":
+            return (
+                f"⚙️ <b>Configurações Atuais</b>\n\n"
+                f"<b>Trading:</b>\n"
+                f"Confiança Min: {bot.min_confidence*100:.0f}%\n"
+                f"Risco/Trade: {bot.risk_per_trade*100:.2f}%\n"
+                f"Stop Loss: {bot.sl_atr_mult:.1f}x ATR\n"
+                f"Take Profit: {bot.tp_atr_mult:.1f}x ATR\n"
+                f"Cooldown: {bot.trade_cooldown/60:.0f}min\n\n"
+                f"<b>Modelo:</b>\n"
+                f"Threshold: {bot.optimal_threshold:.3f}\n"
+                f"Timeframe: {bot.timeframe}m\n\n"
+                f"<b>Sistema:</b>\n"
+                f"Modo: {'🔵 DRY RUN' if bot.dry_run else '🔴 LIVE'}\n"
+                f"Network: {'TESTNET' if bot.bybit_testnet else 'MAINNET'}\n"
+                f"Estado: {'⏸️ PAUSADO' if hasattr(bot, 'paused') and bot.paused else '▶️ ATIVO'}"
+            )
+
+        # Force check command
+        elif command == "/forcecheck":
+            # Mark last analyzed as None to force new analysis
+            bot.last_analyzed_candle_time = None
+            logger.info("🔄 Forçando nova verificação via Telegram")
+            return "🔄 <b>Verificação Forçada</b>\n\nO bot verificará novo candle na próxima iteração."
 
         else:
             return f"❌ Comando desconhecido: {command}\n\nUse /help para ver comandos disponíveis."
