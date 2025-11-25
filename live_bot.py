@@ -1495,6 +1495,34 @@ class LiveTradingBot:
                         time.sleep(check_interval)
                         continue
 
+                    # Step 3.5: NEW CANDLE detected! Wait for API consolidation
+                    # When candle closes (e.g., 10:15), API needs ~5-15s to consolidate data
+                    # This ensures we get EXACT same data as backtest (complete candle)
+                    logger.info(f"🆕 Novo candle detectado: {current_candle_time}")
+                    logger.info(f"⏳ Aguardando 10s para API consolidar dados...")
+                    time.sleep(10)
+
+                    # Re-download data to get fully consolidated candle
+                    logger.info(f"📥 Re-baixando dados para garantir candle consolidado...")
+                    df = self.get_current_data()
+
+                    if df is None or df.empty:
+                        logger.warning("⚠️ No data received on re-fetch")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Get the SAME candle again (now fully consolidated)
+                    current = df.iloc[-2]
+                    new_candle_time = current.name
+
+                    # Verify we got the same candle (sanity check)
+                    if new_candle_time != current_candle_time:
+                        logger.warning(f"⚠️ Candle mudou após re-fetch: {current_candle_time} → {new_candle_time}")
+                        # Use the new one
+                        current_candle_time = new_candle_time
+
+                    price = current['close']
+
                     # Show current price
                     logger.info(f"📊 Price: ${price:,.2f} | Candle: {current_candle_time}")
 

@@ -956,10 +956,38 @@ Modo: {mode_str} ({network_str})
                         time.sleep(check_interval)
                         continue
 
+                    # 🔥 NEW: Wait for API consolidation when new candle detected
+                    # This ensures we get EXACT same data as backtest (complete candle)
+                    logger.info(f"🆕 Novo candle detectado: {current_candle_time}")
+                    logger.info(f"⏳ Aguardando 10s para API consolidar dados...")
+                    time.sleep(10)
+
+                    # Re-download data to get fully consolidated candle
+                    logger.info(f"📥 Re-baixando dados para garantir candle consolidado...")
+                    start_time_refetch = time.time()
+                    df = self.get_current_data(symbol, '15m', 30)
+                    fetch_time = time.time() - start_time_refetch
+
+                    if df.empty:
+                        logger.warning("⚠️ No data on re-fetch")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Get the SAME candle again (now fully consolidated)
+                    current = df.iloc[-2]
+                    new_candle_time = current.name
+
+                    # Verify we got the same candle (sanity check)
+                    if new_candle_time != current_candle_time:
+                        logger.warning(f"⚠️ Candle mudou após re-fetch: {current_candle_time} → {new_candle_time}")
+                        current_candle_time = new_candle_time
+
+                    price = current['close']
+
                     if self.position:
                         self.last_price = price
 
-                    logger.info(f"📊 Price: ${price:,.2f} | Fetch: {fetch_time:.1f}s")
+                    logger.info(f"📊 Price: ${price:,.2f} | Candle: {current_candle_time} | Fetch: {fetch_time:.1f}s")
 
                     if self.position:
                         entry = self.position['entry_price']
