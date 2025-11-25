@@ -957,6 +957,14 @@ Modo: {mode_str} ({network_str})
                         time.sleep(check_interval)
                         continue
 
+                    # 🔥 FIX: First run - just mark current candle, don't predict yet
+                    if self.last_analyzed_candle_time is None:
+                        logger.info(f"🚀 Primeira inicialização - marcando candle atual: {current_candle_time}")
+                        logger.info(f"⏳ Aguardando próximo candle fechar (~15min) para fazer primeira predição...")
+                        self.last_analyzed_candle_time = current_candle_time
+                        time.sleep(check_interval)
+                        continue
+
                     # 🔥 NEW: Wait for API consolidation when new candle detected
                     # This ensures we get EXACT same data as backtest (complete candle)
                     logger.info(f"🆕 Novo candle detectado: {current_candle_time}")

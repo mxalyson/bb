@@ -1580,7 +1580,15 @@ class LiveTradingBot:
                         time.sleep(check_interval)
                         continue
 
-                    # Step 3.5: NEW CANDLE detected! Wait for API consolidation
+                    # Step 3.5: First run - just mark current candle, don't predict yet
+                    if self.last_analyzed_candle_time is None:
+                        logger.info(f"🚀 Primeira inicialização - marcando candle atual: {current_candle_time}")
+                        logger.info(f"⏳ Aguardando próximo candle fechar (~15min) para fazer primeira predição...")
+                        self.last_analyzed_candle_time = current_candle_time
+                        time.sleep(check_interval)
+                        continue
+
+                    # Step 3.6: NEW CANDLE detected! Wait for API consolidation
                     # When candle closes (e.g., 10:15), API needs ~5-15s to consolidate data
                     # This ensures we get EXACT same data as backtest (complete candle)
                     logger.info(f"🆕 Novo candle detectado: {current_candle_time}")
