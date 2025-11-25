@@ -11,6 +11,36 @@ from core.bybit_rest import BybitRESTClient
 from core.utils import load_config
 from core.features import FeatureStore
 
+
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """V1 advanced features - SAME AS BOT!"""
+    df_features = df.copy()
+
+    # Momentum features
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # Trend strength
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regime
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    # Volume and price dynamics
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    return df_features
+
 print("="*80)
 print("🔍 BOT SIGNAL CHECKER")
 print("="*80 + "\n")
@@ -32,16 +62,21 @@ print(f"✅ Model: {model_path}\n")
 config = load_config('standard')
 rest_client = BybitRESTClient(config['bybit_api_key'], config['bybit_api_secret'], config['bybit_testnet'])
 
-print("📥 Downloading 1 day data...")
+print("📥 Downloading 30 days data (SAME AS BOT)...")
 dm = DataManager(rest_client)
-df = dm.get_data('BTCUSDT', '15m', 1, use_cache=False)
+df = dm.get_data('BTCUSDT', '15m', 30, use_cache=False)
 print(f"✅ Got {len(df)} candles\n")
 
 # Build features
-print("🔨 Building features...")
+print("🔨 Building base features...")
 fs = FeatureStore(config)
 df_feat = fs.build_features(df)
-print(f"✅ Shape: {df_feat.shape}\n")
+print(f"✅ Base features: {df_feat.shape}")
+
+# Apply V1 advanced features (CRITICAL!)
+print("🔧 Applying V1 advanced features...")
+df_feat = create_advanced_features(df_feat)
+print(f"✅ After V1 features: {df_feat.shape}\n")
 
 # Load model
 print("🤖 Loading model...")
