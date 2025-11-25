@@ -1531,6 +1531,35 @@ class LiveTradingBot:
         logger.info("Press Ctrl+C to stop")
         logger.info("")
 
+        # 🔍 DIAGNOSTIC: Check for missing features BEFORE starting loop
+        logger.info("🔍 Checking feature compatibility...")
+        try:
+            # Get sample data to check features
+            df_test = self.get_current_data()
+            if df_test is not None and not df_test.empty:
+                df_features = set(df_test.columns)
+                model_features = set(self.feature_names)
+                missing = model_features - df_features
+                extra = df_features - model_features
+
+                logger.info(f"   📊 Model expects: {len(model_features)} features")
+                logger.info(f"   📊 Bot generates: {len(df_features)} features")
+
+                if missing:
+                    logger.warning(f"\n⚠️ MISSING {len(missing)} FEATURES:")
+                    for feat in sorted(missing):
+                        logger.warning(f"   ❌ {feat}")
+                    logger.warning("\n⚠️ These will be filled with 0 (may affect predictions!)\n")
+                else:
+                    logger.info("   ✅ All features present!")
+
+                if extra:
+                    logger.info(f"   ℹ️ {len(extra)} extra features (unused by model)")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Could not check features: {e}")
+
+        logger.info("")
+
         # Try to recover any open positions from Bybit
         self.recover_open_positions()
 
