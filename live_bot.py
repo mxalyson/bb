@@ -545,6 +545,10 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
 
     df_feat = df.copy()
 
+    # Log initial columns
+    initial_cols = set(df_feat.columns)
+    logger.info(f"   📊 Starting with {len(initial_cols)} columns from FeatureStore")
+
     # === BASIC FEATURES ===
     df_feat['returns'] = df_feat['close'].pct_change()
     df_feat['returns_5'] = df_feat['close'].pct_change(5)
@@ -677,7 +681,20 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
     # Fill NaN
     df_feat = df_feat.fillna(method='bfill').fillna(0)
 
-    logger.info("   ✅ Features created (matching training)")
+    # Log final columns
+    final_cols = set(df_feat.columns)
+    added_cols = final_cols - initial_cols
+    logger.info(f"   ✅ Features created: {len(final_cols)} total ({len(added_cols)} added)")
+
+    # Save feature list to file for comparison
+    try:
+        with open('/tmp/live_bot_features.txt', 'w') as f:
+            for feat in sorted(df_feat.columns):
+                f.write(f"{feat}\n")
+        logger.info(f"   📝 Feature list saved to /tmp/live_bot_features.txt")
+    except:
+        pass
+
     return df_feat
 
 
