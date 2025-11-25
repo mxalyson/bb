@@ -575,6 +575,100 @@ def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     return df_features
 
 
+def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add V2 ADVANCED features - MUST match train_master_scalper_v2.py exactly!
+    (Copied from 2.py for compatibility)
+    """
+    df_features = df.copy()
+
+    # === BASIC MOMENTUM (Multiple timeframes) ===
+    for period in [3, 5, 8, 13, 21, 34]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # === TREND STRENGTH ===
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+    df_features['trend_consistency'] = df_features['close'].rolling(20).apply(
+        lambda x: (x.iloc[-1] > x.iloc[0]) == (x.diff().mean() > 0)
+    )
+
+    # === VOLATILITY REGIME ===
+    df_features['volatility_regime'] = df_features['atr'] / df_features['atr'].rolling(50).mean()
+    df_features['volatility_change'] = df_features['atr'].pct_change(5)
+
+    # === PRICE POSITION IN RANGE ===
+    for period in [10, 20, 50]:
+        high_period = df_features['high'].rolling(period).max()
+        low_period = df_features['low'].rolling(period).min()
+        df_features[f'price_position_{period}'] = (
+            (df_features['close'] - low_period) / (high_period - low_period + 1e-8)
+        )
+
+    # === VOLUME ANALYSIS ===
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['volume_acceleration'] = df_features['volume'].diff(2) - df_features['volume'].diff(1)
+    df_features['price_volume_corr'] = df_features['close'].rolling(20).corr(df_features['volume'])
+
+    # === ACCELERATION & JERK ===
+    df_features['price_velocity'] = df_features['close'].diff(1)
+    df_features['price_acceleration'] = df_features['price_velocity'].diff(1)
+    df_features['price_jerk'] = df_features['price_acceleration'].diff(1)
+
+    # === HIGHER ORDER MOMENTS ===
+    for period in [10, 20, 50]:
+        returns = df_features['close'].pct_change()
+        df_features[f'returns_skew_{period}'] = returns.rolling(period).skew()
+        df_features[f'returns_kurt_{period}'] = returns.rolling(period).kurt()
+        df_features[f'returns_std_{period}'] = returns.rolling(period).std()
+
+    # === MARKET MICROSTRUCTURE ===
+    df_features['spread_proxy'] = (df_features['high'] - df_features['low']) / df_features['close'] * 100
+
+    for period in [10, 20]:
+        ma = df_features['close'].rolling(period).mean()
+        df_features[f'price_efficiency_{period}'] = (df_features['close'] - ma) / ma * 100
+
+    # === REGIME DETECTION ===
+    df_features['adx_proxy'] = df_features['atr'] / df_features['close'] * 100
+    median_volume = df_features['volume'].rolling(100).median()
+    df_features['volume_regime'] = (df_features['volume'] > median_volume).astype(int)
+
+    # === RELATIVE STRENGTH ===
+    for period in [5, 10, 20]:
+        gains = df_features['close'].diff().clip(lower=0)
+        losses = -df_features['close'].diff().clip(upper=0)
+        avg_gain = gains.rolling(period).mean()
+        avg_loss = losses.rolling(period).mean()
+        rs = avg_gain / (avg_loss + 1e-8)
+        df_features[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+
+    # === MOMENTUM OSCILLATORS ===
+    for period in [5, 10, 20]:
+        df_features[f'roc_{period}'] = (
+            (df_features['close'] - df_features['close'].shift(period)) /
+            df_features['close'].shift(period) * 100
+        )
+
+    # === BOLLINGER BANDS FEATURES ===
+    for period in [20, 50]:
+        sma = df_features['close'].rolling(period).mean()
+        std = df_features['close'].rolling(period).std()
+        df_features[f'bb_position_{period}'] = (df_features['close'] - sma) / (2 * std + 1e-8)
+        df_features[f'bb_width_{period}'] = (4 * std) / sma * 100
+
+    # === CANDLE PATTERNS ===
+    body = abs(df_features['close'] - df_features['open'])
+    upper_shadow = df_features['high'] - df_features[['close', 'open']].max(axis=1)
+    lower_shadow = df_features[['close', 'open']].min(axis=1) - df_features['low']
+
+    df_features['body_size'] = body / df_features['close'] * 100
+    df_features['upper_shadow_ratio'] = upper_shadow / (body + 1e-8)
+    df_features['lower_shadow_ratio'] = lower_shadow / (body + 1e-8)
+
+    return df_features
+
+
 def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
     """
     Create features matching train_master_scalper.py.
@@ -879,6 +973,11 @@ class LiveTradingBot:
         self.feature_names = self.model_data['feature_names']
         self.optimal_threshold = self.model_data['optimal_threshold']
 
+        # Detect model version (same as 2.py)
+        self.model_version = self._detect_model_version()
+        logger.info(f"📌 Detected model type: {self.model_version}")
+        logger.info(f"   Required features: {len(self.feature_names)}")
+
         # Fetch market meta (tick size, qty step, min qty)
         logger.info("📊 Fetching market metadata...")
         try:
@@ -975,6 +1074,33 @@ class LiveTradingBot:
         except Exception as e:
             logger.error(f"❌ Erro ao salvar estado: {e}")
 
+    def _detect_model_version(self) -> str:
+        """
+        Detect model version based on feature names (same as 2.py).
+
+        Returns:
+            str: Model version ("V1", "V2", "Classical", or "Unknown")
+        """
+        feature_names = self.feature_names
+
+        # Feature signatures for each version
+        classical_features = ['sma_7', 'sma_21', 'ema_7', 'ema_21']
+        v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20', 'bb_width_50', 'price_position_10']
+        v1_features = ['momentum_3', 'momentum_5', 'volume_ratio_3', 'price_position']
+
+        has_classical = any(f in feature_names for f in classical_features)
+        has_v2 = any(f in feature_names for f in v2_features)
+        has_v1 = any(f in feature_names for f in v1_features)
+
+        if has_classical:
+            return "Classical"
+        elif has_v2:
+            return "V2"
+        elif has_v1:
+            return "V1"
+        else:
+            return "Unknown"
+
     def get_current_data(self) -> pd.DataFrame:
         """Download latest data and build features with timeout protection."""
 
@@ -1024,8 +1150,20 @@ class LiveTradingBot:
             logger.info(f"⚙️ Construindo features...")
             df_features = self.feature_store.build_features(df, normalize=False)
 
-            # Add advanced features (matching train_master_scalper.py)
-            df_features = create_advanced_features(df_features)
+            # Add advanced features based on detected model version (same as 2.py)
+            if self.model_version == "V1":
+                logger.info(f"   Applying V1 advanced features...")
+                df_features = create_advanced_features(df_features)
+            elif self.model_version == "V2":
+                logger.info(f"   Applying V2 advanced features...")
+                df_features = create_advanced_features_v2(df_features)
+            elif self.model_version == "Classical":
+                logger.info(f"   Applying Classical TA features...")
+                # Classical doesn't need extra features, FeatureStore is enough
+                pass
+            else:
+                logger.warning(f"   ⚠️ Unknown model type - using V1 features as fallback")
+                df_features = create_advanced_features(df_features)
 
             return df_features
 
