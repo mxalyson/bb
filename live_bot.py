@@ -450,8 +450,13 @@ def load_model_universal(model_path: str) -> dict:
 # ============================================================================
 
 def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
-    """Create features matching train_with_real_data.py"""
-    logger.info("   Creating features (matching training data)...")
+    """
+    Create features matching train_master_scalper.py.
+
+    This adds advanced features on top of FeatureStore features to ensure
+    compatibility with ml_model_master_scalper_365d.pkl.
+    """
+    logger.info("   Creating advanced features (matching train_master_scalper.py)...")
 
     df_feat = df.copy()
 
