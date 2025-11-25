@@ -1423,7 +1423,7 @@ class LiveTradingBot:
         return seconds_until_close
 
     def run(self):
-        """Main trading loop with intelligent timing and watchdog."""
+        """Main trading loop - SIMPLIFIED to match btc_real_v5.py proven logic."""
 
         logger.info("🚀 Starting trading loop...")
         logger.info("Press Ctrl+C to stop")
@@ -1431,10 +1431,6 @@ class LiveTradingBot:
 
         # Try to recover any open positions from Bybit
         self.recover_open_positions()
-
-        # Track last data fetch to avoid excessive API calls
-        last_data_fetch_time = None
-        cached_df = None
 
         # Watchdog: track last activity to detect if bot is stuck
         last_heartbeat = datetime.now()
@@ -1444,7 +1440,9 @@ class LiveTradingBot:
         # Circuit breaker: track consecutive errors
         consecutive_errors = 0
         max_consecutive_errors = 5
-        last_error_time = None
+
+        # Simple check interval (like btc_real_v5.py)
+        check_interval = 30  # 30 seconds
 
         try:
             while True:
@@ -1466,37 +1464,39 @@ class LiveTradingBot:
                     # Check for Telegram commands
                     self.telegram.check_commands()
 
-                    # Calculate time until next candle closes
-                    seconds_until_close = self.calculate_seconds_until_candle_close(int(self.timeframe))
+                    # ===================================================================
+                    # SIMPLIFIED LOGIC (matching btc_real_v5.py):
+                    # 1. Download data EVERY iteration
+                    # 2. Get closed candle (iloc[-2])
+                    # 3. Check if already analyzed → skip if yes
+                    # 4. Check cooldown → skip if yes
+                    # 5. Make prediction
+                    # 6. Mark as analyzed
+                    # 7. Sleep 30s
+                    # 8. Repeat
+                    # ===================================================================
 
-                    # Only fetch data when:
-                    # 1. No cached data exists
-                    # 2. Candle is about to close (< 60s remaining)
-                    # 3. More than 5 minutes since last fetch (for monitoring positions)
-                    should_fetch = (
-                        cached_df is None or
-                        seconds_until_close < 60 or
-                        (last_data_fetch_time and (datetime.now() - last_data_fetch_time).total_seconds() > 300)
-                    )
+                    # Step 1: Download data EVERY iteration (simple, reliable)
+                    df = self.get_current_data()
 
-                    if should_fetch:
-                        df = self.get_current_data()
-                        cached_df = df
-                        last_data_fetch_time = datetime.now()
+                    if df is None or df.empty:
+                        logger.warning("⚠️ No data received")
+                        time.sleep(check_interval)
+                        continue
 
-                        # Get last CLOSED candle
-                        current = df.iloc[-2]
-                        current_candle_time = current.name
+                    # Step 2: Get CLOSED candle (iloc[-2]) not incomplete candle (iloc[-1])
+                    current = df.iloc[-2]
+                    current_candle_time = current.name
+                    price = current['close']
 
-                        # Show current status
-                        from datetime import timezone
-                        now_utc = datetime.now(timezone.utc)
-                        logger.info(f"🔍 Candle close: {current_candle_time} | Now UTC: {now_utc} | Diff: {seconds_until_close}s")
-                    else:
-                        # Use cached data
-                        df = cached_df
-                        current = df.iloc[-2]
-                        current_candle_time = current.name
+                    # Step 3: Skip if already analyzed this candle
+                    if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
+                        logger.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Show current price
+                    logger.info(f"📊 Price: ${price:,.2f} | Candle: {current_candle_time}")
 
                     # Check if we have an open position
                     if self.position:
@@ -1505,10 +1505,15 @@ class LiveTradingBot:
 
                         # If still have position, wait before next check
                         if self.position:
-                            # Wait 30s when monitoring position
-                            logger.info(f"⏳ Monitorando posição... próxima verificação em 30s (vela fecha em {seconds_until_close}s)")
-                            time.sleep(30)
-                            continue
+                            entry = self.position['entry_price']
+                            direction = self.position['direction']
+
+                            if direction == 'long':
+                                pnl_pct = ((price - entry) / entry) * 100
+                            else:
+                                pnl_pct = ((entry - price) / entry) * 100
+
+                            logger.info(f"🟢 {direction.upper()} @ ${entry:,.2f} | PnL: {pnl_pct:+.2f}%")
 
                     # Check if we can open a new position
                     else:
@@ -1518,122 +1523,89 @@ class LiveTradingBot:
                             time.sleep(60)
                             continue
 
-                        # CRITICAL: Check if this is a NEW candle that needs analysis
-                        is_new_candle = (not self.last_analyzed_candle_time or
-                                        current_candle_time != self.last_analyzed_candle_time)
-
-                        # If NEW candle detected, make prediction IMMEDIATELY
-                        if is_new_candle:
-                            # Check cooldown first
-                            if self.last_trade_time:
-                                time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
-                                if time_since_last_trade < self.trade_cooldown:
-                                    remaining = self.trade_cooldown - time_since_last_trade
-                                    logger.info(f"⏳ Cooldown: {remaining:.0f}s restantes ({remaining/60:.1f}min) - pulando candle")
-                                    self.last_analyzed_candle_time = current_candle_time  # Mark as analyzed
-                                    time.sleep(min(60, remaining))
-                                    continue
-
-                            # NEW CANDLE - Make prediction NOW!
-                            logger.info(f"🔍 NOVO CANDLE detectado: {current_candle_time}")
-
-                            # Make prediction
-                            try:
-                                logger.info("")
-                                logger.info("=" * 80)
-                                logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
-                                logger.info(f"💰 Preço Close: ${current['close']:,.2f}")
-                                logger.info(f"📊 ATR: ${current.get('atr', 0):,.2f}")
-                                logger.info("=" * 80)
-
-                                # Get prediction for ONLY the last closed candle (iloc[-2])
-                                df_single = df.iloc[[-2]].copy()
-
-                                predictions = make_prediction(
-                                    self.model,
-                                    self.model_data,
-                                    df_single,
-                                    self.feature_names
-                                )
-
-                                # Get prediction
-                                pred = predictions[0]  # Only one prediction
-
-                                # Calculate confidence (CORRETO - same as 2.py)
-                                ml_confidence = abs(pred - self.optimal_threshold) * 2
-
-                                # Determine signal EXACTLY same as 2.py
-                                signal = 0  # Start as NEUTRO
-                                if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
-                                    signal = 1  # long
-                                elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
-                                    signal = -1  # short
-
-                                sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
-
-                                # SEMPRE mostrar detalhes da predição
-                                logger.info("")
-                                logger.info("=" * 80)
-                                logger.info(f"🔮 PREDIÇÃO GERADA")
-                                logger.info("=" * 80)
-                                logger.info(f"📊 Probabilidade: {pred:.4f}")
-                                logger.info(f"🎯 Threshold: {self.optimal_threshold:.4f}")
-                                logger.info(f"📈 Confiança: {ml_confidence:.2%}")
-                                logger.info(f"🎲 Sinal: {sig_name}")
-                                logger.info(f"⚙️ Min Confiança: {self.min_confidence:.2%}")
-                                logger.info("=" * 80)
-                                logger.info("")
-
-                                # Mark this candle as analyzed (regardless of whether we trade)
+                        # Step 4: Check cooldown
+                        if self.last_trade_time:
+                            time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
+                            if time_since_last_trade < self.trade_cooldown:
+                                remaining_min = int((self.trade_cooldown - time_since_last_trade) / 60)
+                                logger.info(f"⏳ Cooldown: {remaining_min}min restantes")
+                                # Mark this candle as analyzed even during cooldown
                                 self.last_analyzed_candle_time = current_candle_time
-
-                                # Check if we have a valid signal (not NEUTRO)
-                                if signal != 0:
-                                    logger.info(f"✅ Sinal VÁLIDO: {sig_name} com confiança {ml_confidence:.2%} >= {self.min_confidence:.2%}")
-                                    self.open_position(current, signal, ml_confidence)
-                                else:
-                                    # Explicar POR QUE foi neutro
-                                    if ml_confidence < self.min_confidence:
-                                        logger.info(f"⏭️ Sinal NEUTRO: Confiança {ml_confidence:.2%} < {self.min_confidence:.2%} (mínimo)")
-                                    else:
-                                        logger.info(f"⏭️ Sinal NEUTRO: Probabilidade {pred:.4f} muito próxima do threshold {self.optimal_threshold:.4f}")
-
-                            except Exception as e:
-                                logger.error(f"Prediction error: {e}")
-                                import traceback
-                                traceback.print_exc()
-
-                        # NOT a new candle - wait for next candle
-                        else:
-                            # If candle hasn't closed yet, wait
-                            if seconds_until_close > 45:
-                                # Calculate smart wait time
-                                if seconds_until_close > 600:  # More than 10 minutes
-                                    wait_time = 300  # Wait 5 minutes
-                                elif seconds_until_close > 300:  # More than 5 minutes
-                                    wait_time = 120  # Wait 2 minutes
-                                elif seconds_until_close > 120:  # More than 2 minutes
-                                    wait_time = 60  # Wait 1 minute
-                                else:
-                                    wait_time = 30  # Wait 30 seconds
-
-                                logger.info(f"⏳ Aguardando próximo candle - vela fecha em {seconds_until_close}s ({wait_time}s wait)...")
-                                time.sleep(wait_time)
+                                time.sleep(check_interval)
                                 continue
 
-                            # Candle is closing soon - wait for it to fully close
-                            if seconds_until_close > 0 and seconds_until_close <= 45:
-                                logger.info(f"⏳ Vela fecha em {seconds_until_close}s - aguardando fechamento...")
-                                time.sleep(seconds_until_close + 5)  # Wait for close + 5s buffer
-                                # Force data refresh on next iteration
-                                cached_df = None
-                                continue
+                        # Step 5: Make prediction
+                        try:
+                            logger.info("")
+                            logger.info("=" * 80)
+                            logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
+                            logger.info(f"💰 Preço Close: ${current['close']:,.2f}")
+                            logger.info(f"📊 ATR: ${current.get('atr', 0):,.2f}")
+                            logger.info("=" * 80)
 
-                    # Calculate next check time
-                    seconds_until_close = self.calculate_seconds_until_candle_close(int(self.timeframe))
-                    wait_time = min(10, seconds_until_close // 2) if seconds_until_close < 60 else 30
-                    logger.info(f"⏳ Aguardando próxima vela fechar em {seconds_until_close}s ({seconds_until_close/60:.1f}min)...")
-                    time.sleep(wait_time)
+                            # Get prediction for ONLY the last closed candle (iloc[-2])
+                            df_single = df.iloc[[-2]].copy()
+
+                            predictions = make_prediction(
+                                self.model,
+                                self.model_data,
+                                df_single,
+                                self.feature_names
+                            )
+
+                            # Get prediction
+                            pred = predictions[0]  # Only one prediction
+
+                            # Calculate confidence (same as btc_real_v5.py and 2.py)
+                            ml_confidence = abs(pred - self.optimal_threshold) * 2
+
+                            # Determine signal (same as btc_real_v5.py and 2.py)
+                            signal = 0  # Start as NEUTRO
+                            if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
+                                signal = 1  # long
+                            elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
+                                signal = -1  # short
+
+                            sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
+                            passes = ml_confidence >= self.min_confidence
+                            status = '✅ PASS' if passes else '❌ FILTERED'
+
+                            # SEMPRE mostrar detalhes da predição
+                            logger.info("")
+                            logger.info("=" * 80)
+                            logger.info(f"🔮 PREDIÇÃO GERADA")
+                            logger.info("=" * 80)
+                            logger.info(f"📊 Probabilidade: {pred:.4f}")
+                            logger.info(f"🎯 Threshold: {self.optimal_threshold:.4f}")
+                            logger.info(f"📈 Confiança: {ml_confidence:.2%}")
+                            logger.info(f"🎲 Sinal: {sig_name} | {status}")
+                            logger.info(f"⚙️ Min Confiança: {self.min_confidence:.2%}")
+                            logger.info("=" * 80)
+                            logger.info("")
+
+                            # Step 6: Mark this candle as analyzed (regardless of whether we trade)
+                            self.last_analyzed_candle_time = current_candle_time
+
+                            # Check if we have a valid signal (not NEUTRO)
+                            if signal != 0 and passes:
+                                logger.info("="*80)
+                                logger.info(f"🚨 OPENING {sig_name} POSITION")
+                                logger.info("="*80)
+                                self.open_position(current, signal, ml_confidence)
+                            else:
+                                # Explicar POR QUE foi neutro/filtered
+                                if not passes:
+                                    logger.info(f"⏭️ FILTERED: Confiança {ml_confidence:.2%} < {self.min_confidence:.2%} (mínimo)")
+                                else:
+                                    logger.info(f"⏭️ NEUTRO: Probabilidade {pred:.4f} próxima do threshold {self.optimal_threshold:.4f}")
+
+                        except Exception as e:
+                            logger.error(f"❌ Prediction error: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Step 7: Sleep check_interval (30s) before next iteration
+                    time.sleep(check_interval)
 
                     # Reset consecutive errors on successful iteration
                     if consecutive_errors > 0:
