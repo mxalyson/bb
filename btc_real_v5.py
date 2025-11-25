@@ -514,14 +514,15 @@ class MasterLiveTrader:
             else:
                 ml_prob_up = float(ml_probs)
 
-            ml_prob_down = 1.0 - ml_prob_up
-            ml_confidence = abs(ml_prob_up - 0.5) * 2.0
+            # 🔥 FIX: Use optimal_threshold (not fixed 0.5) - MATCHING 2.py
+            ml_confidence = abs(ml_prob_up - self.optimal_threshold) * 2.0
 
             signal = 0
-            if ml_prob_up > 0.5 and ml_confidence >= self.min_confidence:
-                signal = 1
-            elif ml_prob_down > 0.5 and ml_confidence >= self.min_confidence:
-                signal = -1
+            # 🔥 FIX: Compare with optimal_threshold (not fixed 0.5) - MATCHING 2.py
+            if ml_prob_up > self.optimal_threshold and ml_confidence >= self.min_confidence:
+                signal = 1  # LONG
+            elif ml_prob_up < self.optimal_threshold and ml_confidence >= self.min_confidence:
+                signal = -1  # SHORT
 
             return signal, ml_confidence, latest
 
