@@ -766,11 +766,16 @@ def make_prediction(model, model_data, df, feature_names):
         X = df[feature_names].values
 
         # Apply scaler if exists in model_data (for dict-based models)
-        if 'scaler_mean' in model_data and 'scaler_std' in model_data:
-            scaler_mean = np.array(model_data['scaler_mean'])
-            scaler_std = np.array(model_data['scaler_std'])
+        scaler_mean = model_data.get('scaler_mean')
+        scaler_std = model_data.get('scaler_std')
+
+        if scaler_mean is not None and scaler_std is not None:
+            scaler_mean = np.array(scaler_mean)
+            scaler_std = np.array(scaler_std)
             X = (X - scaler_mean) / (scaler_std + 1e-8)
             logger.info("   🔢 Applied Z-score normalization (scaler_mean/scaler_std)")
+        else:
+            logger.info("   ℹ️  No scaler found - using raw features")
 
         # LightGBM models use .predict() not .predict_proba()
         # And return probabilities directly
