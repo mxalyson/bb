@@ -1686,7 +1686,9 @@ class LiveTradingBot:
 
                     # SAFETY CHECKS (redundant with filter in get_current_data but good to have)
                     # These should never trigger because filter ensures candle closed >= 10s ago
-                    max_candle_age = 90  # 90 seconds
+                    # IMPORTANT: max_candle_age should be at least 1 full candle (15min = 900s)
+                    # to avoid skipping valid signals when bot is slightly delayed
+                    max_candle_age = 900  # 15 minutes (1 full candle)
 
                     if seconds_since_candle_close < 0:
                         # Should NEVER happen - filter already removed incomplete candles
