@@ -80,8 +80,11 @@ with open(model_path, 'rb') as f:
 
 model = data['model']
 feature_names = data['feature_names']
+scaler_mean = data.get('scaler_mean')
+scaler_std = data.get('scaler_std')
 threshold = data.get('optimal_threshold', 0.5)
-print(f"✅ Model: {len(feature_names)} features needed\n")
+print(f"✅ Model: {len(feature_names)} features needed")
+print(f"✅ Scaler: {'Present' if scaler_mean is not None else 'Not found'}\n")
 
 # Check missing features
 missing = [f for f in feature_names if f not in df_feat.columns]
@@ -94,7 +97,16 @@ print("✅ All features present!\n")
 
 # Prepare X
 X = df_feat[feature_names].fillna(0).replace([np.inf, -np.inf], 0)
-print(f"✅ X prepared: {X.shape}\n")
+print(f"✅ X prepared: {X.shape}")
+
+# Apply Z-score normalization (CRITICAL!)
+if scaler_mean is not None and scaler_std is not None:
+    scaler_mean_arr = np.array(scaler_mean)
+    scaler_std_arr = np.array(scaler_std)
+    X = (X - scaler_mean_arr) / (scaler_std_arr + 1e-8)
+    print("✅ Applied Z-score normalization\n")
+else:
+    print("⚠️  No scaler found - using raw features\n")
 
 print("🔮 Predicting...")
 preds = model.predict(X.values)
