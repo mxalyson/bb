@@ -811,19 +811,44 @@ class LiveTradingBot:
             logger.error(f"❌ Erro ao salvar estado: {e}")
 
     def get_current_data(self) -> pd.DataFrame:
-        """Download latest data and build features."""
+        """Download latest data and build features with timeout protection."""
 
         # Download data (30 days lookback for indicators)
         lookback_days = 30
 
         try:
-            # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
-            df = self.data_manager.get_data(
-                self.symbol,
-                f'{self.timeframe}m',
-                lookback_days,
-                False  # use_cache=False
-            )
+            import signal
+            from contextlib import contextmanager
+
+            @contextmanager
+            def timeout_context(seconds):
+                """Context manager for timeout protection."""
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"Operation timed out after {seconds}s")
+
+                # Set alarm (only works on Unix)
+                if hasattr(signal, 'SIGALRM'):
+                    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(seconds)
+                    try:
+                        yield
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, old_handler)
+                else:
+                    # Windows doesn't support SIGALRM, skip timeout
+                    yield
+
+            # Protect data download with 120s timeout
+            logger.info(f"📥 Baixando dados com timeout de 120s...")
+            with timeout_context(120):
+                # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
+                df = self.data_manager.get_data(
+                    self.symbol,
+                    f'{self.timeframe}m',
+                    lookback_days,
+                    False  # use_cache=False
+                )
 
             if df.empty:
                 raise ValueError("No data received")
@@ -831,6 +856,7 @@ class LiveTradingBot:
             logger.info(f"📥 Downloaded {len(df)} candles")
 
             # Build features using FeatureStore
+            logger.info(f"⚙️ Construindo features...")
             df_features = self.feature_store.build_features(df, normalize=False)
 
             # Create features matching training data
@@ -838,6 +864,9 @@ class LiveTradingBot:
 
             return df_features
 
+        except TimeoutError as e:
+            logger.error(f"❌ Download TIMEOUT: {e}")
+            raise
         except Exception as e:
             logger.error(f"❌ Error fetching data: {e}")
             raise
@@ -1389,7 +1418,7 @@ class LiveTradingBot:
         return seconds_until_close
 
     def run(self):
-        """Main trading loop with intelligent timing."""
+        """Main trading loop with intelligent timing and watchdog."""
 
         logger.info("🚀 Starting trading loop...")
         logger.info("Press Ctrl+C to stop")
@@ -1402,9 +1431,33 @@ class LiveTradingBot:
         last_data_fetch_time = None
         cached_df = None
 
+        # Watchdog: track last activity to detect if bot is stuck
+        last_heartbeat = datetime.now()
+        heartbeat_interval = 300  # 5 minutes
+        loop_counter = 0
+
+        # Circuit breaker: track consecutive errors
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        last_error_time = None
+
         try:
             while True:
                 try:
+                    loop_counter += 1
+
+                    # Heartbeat check - log every 5 minutes to prove we're alive
+                    now = datetime.now()
+                    if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
+                        from datetime import timezone
+                        now_utc = datetime.now(timezone.utc)
+                        logger.info(f"💓 Heartbeat #{loop_counter} | UTC: {now_utc.strftime('%H:%M:%S')} | Status: {'Position open' if self.position else 'No position'}")
+                        last_heartbeat = now
+
+                        # Send heartbeat via Telegram every hour
+                        if loop_counter % 12 == 0:  # ~every hour with 5min heartbeats
+                            self.telegram.send(f"💓 <b>Bot Alive</b>\n\nLoop #{loop_counter}\nStatus: {'Position open' if self.position else 'No position'}")
+
                     # Check for Telegram commands
                     self.telegram.check_commands()
 
@@ -1558,13 +1611,36 @@ class LiveTradingBot:
                     logger.info(f"⏳ Aguardando próxima vela fechar em {seconds_until_close}s ({seconds_until_close/60:.1f}min)...")
                     time.sleep(wait_time)
 
+                    # Reset consecutive errors on successful iteration
+                    if consecutive_errors > 0:
+                        logger.info(f"✅ Recovered from errors (was {consecutive_errors} consecutive)")
+                        consecutive_errors = 0
+
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
-                    logger.error(f"Error in main loop: {e}")
+                    consecutive_errors += 1
+                    last_error_time = datetime.now()
+
+                    logger.error(f"❌ Error in main loop (#{consecutive_errors}): {e}")
                     import traceback
                     traceback.print_exc()
-                    time.sleep(30)
+
+                    # Circuit breaker: if too many consecutive errors, increase wait time and alert
+                    if consecutive_errors >= max_consecutive_errors:
+                        error_msg = f"🚨 CIRCUIT BREAKER: {consecutive_errors} consecutive errors! Última: {e}"
+                        logger.error(error_msg)
+                        self.telegram.send(f"🚨 <b>ALERTA: Bot com problemas</b>\n\n{consecutive_errors} erros consecutivos\n\nÚltimo erro:\n{str(e)[:200]}")
+
+                        # Long wait (5 minutes) to avoid hammering if there's a persistent issue
+                        wait_seconds = 300
+                        logger.error(f"⏳ Waiting {wait_seconds}s before retry...")
+                        time.sleep(wait_seconds)
+                    else:
+                        # Exponential backoff: 30s, 60s, 90s, 120s, 150s
+                        wait_seconds = min(30 * consecutive_errors, 150)
+                        logger.warning(f"⏳ Waiting {wait_seconds}s before retry...")
+                        time.sleep(wait_seconds)
 
         except KeyboardInterrupt:
             logger.info("")
