@@ -534,6 +534,47 @@ def load_model_universal(model_path: str) -> dict:
 # FEATURE ENGINEERING (from 1.py)
 # ============================================================================
 
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add MASTER TRADER advanced features (matching train_master_scalper.py EXACTLY).
+
+    This function replicates the create_advanced_features() from train_master_scalper.py
+    to ensure bot generates SAME features as training.
+    """
+    logger.info("   Creating advanced features (matching train_master_scalper.py)...")
+
+    df_features = df.copy()
+
+    # Multi-period momentum
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # Trend strength
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regimes
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position in recent range
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    # Volume momentum
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+
+    # Acceleration
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    logger.info(f"   ✅ Advanced features added: {len(df_features.columns)} total columns")
+
+    return df_features
+
+
 def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
     """
     Create features matching train_master_scalper.py.
@@ -983,8 +1024,8 @@ class LiveTradingBot:
             logger.info(f"⚙️ Construindo features...")
             df_features = self.feature_store.build_features(df, normalize=False)
 
-            # Create features matching training data
-            df_features = create_features_for_bot(df_features)
+            # Add advanced features (matching train_master_scalper.py)
+            df_features = create_advanced_features(df_features)
 
             return df_features
 
