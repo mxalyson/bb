@@ -684,12 +684,29 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
 def make_prediction(model, model_data, df, feature_names):
     """Make prediction using ensemble model."""
 
+    # 🔥 CRITICAL: Check for missing features
+    df_features = set(df.columns)
+    model_features = set(feature_names)
+    missing_features = model_features - df_features
+
+    if missing_features:
+        logger.warning(f"⚠️ MISSING {len(missing_features)} FEATURES:")
+        for feat in list(missing_features)[:10]:
+            logger.warning(f"   - {feat}")
+        if len(missing_features) > 10:
+            logger.warning(f"   ... and {len(missing_features) - 10} more")
+
+        # Fill missing features with 0
+        for feat in missing_features:
+            df[feat] = 0
+        logger.warning(f"⚠️ Filled missing features with 0 (may affect predictions!)")
+
     # Check if using ModelWrapper ensemble
     if hasattr(model, 'models_list'):
         logger.info("   🔄 Using ensemble prediction from ModelWrapper")
 
-        # Prepare features
-        X = df[feature_names].values
+        # Prepare features - ensure correct order
+        X = df[feature_names].fillna(0).values
 
         # Apply scaler if exists
         if hasattr(model, 'scaler') and model.scaler is not None:
@@ -735,7 +752,7 @@ def make_prediction(model, model_data, df, feature_names):
 
     else:
         # Standard model
-        X = df[feature_names].values
+        X = df[feature_names].fillna(0).values
 
         if hasattr(model, 'predict_proba'):
             final_pred = model.predict_proba(X)[:, 1]
