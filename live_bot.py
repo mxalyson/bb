@@ -1834,8 +1834,8 @@ class LiveTradingBot:
                     # When candle closes (e.g., 10:15), API needs ~5-15s to consolidate data
                     # This ensures we get EXACT same data as backtest (complete candle)
                     logger.info(f"🆕 Novo candle detectado: {current_candle_time}")
-                    logger.info(f"⏳ Aguardando 10s para API consolidar dados...")
-                    time.sleep(10)
+                    logger.info(f"⏳ Aguardando 60s para API consolidar dados...")
+                    time.sleep(60)
 
                     # Re-download data to get fully consolidated candle
                     logger.info(f"📥 Re-baixando dados para garantir candle consolidado...")
