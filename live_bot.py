@@ -1567,7 +1567,12 @@ class LiveTradingBot:
 
                         # Make prediction
                         try:
+                            logger.info("")
+                            logger.info("=" * 80)
                             logger.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
+                            logger.info(f"💰 Preço Close: ${current['close']:,.2f}")
+                            logger.info(f"📊 ATR: ${current.get('atr', 0):,.2f}")
+                            logger.info("=" * 80)
 
                             # Get prediction for ONLY the last closed candle (iloc[-2])
                             df_single = df.iloc[[-2]].copy()
@@ -1593,17 +1598,33 @@ class LiveTradingBot:
                                 signal = -1  # short
 
                             sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
-                            logger.info(f"🔮 Previsão: {pred:.3f} | Sinal: {sig_name} | Confiança: {ml_confidence:.1%}")
+
+                            # SEMPRE mostrar detalhes da predição
+                            logger.info("")
+                            logger.info("=" * 80)
+                            logger.info(f"🔮 PREDIÇÃO GERADA")
+                            logger.info("=" * 80)
+                            logger.info(f"📊 Probabilidade: {pred:.4f}")
+                            logger.info(f"🎯 Threshold: {self.optimal_threshold:.4f}")
+                            logger.info(f"📈 Confiança: {ml_confidence:.2%}")
+                            logger.info(f"🎲 Sinal: {sig_name}")
+                            logger.info(f"⚙️ Min Confiança: {self.min_confidence:.2%}")
+                            logger.info("=" * 80)
+                            logger.info("")
 
                             # Mark this candle as analyzed (regardless of whether we trade)
                             self.last_analyzed_candle_time = current_candle_time
 
                             # Check if we have a valid signal (not NEUTRO)
                             if signal != 0:
-                                logger.info(f"✅ Sinal válido: {sig_name} com confiança {ml_confidence:.1%} >= {self.min_confidence:.1%}")
+                                logger.info(f"✅ Sinal VÁLIDO: {sig_name} com confiança {ml_confidence:.2%} >= {self.min_confidence:.2%}")
                                 self.open_position(current, signal, ml_confidence)
                             else:
-                                logger.info(f"⏭️  Sinal NEUTRO (pred={pred:.3f} ou confiança {ml_confidence:.1%} < {self.min_confidence:.1%}) - pulando")
+                                # Explicar POR QUE foi neutro
+                                if ml_confidence < self.min_confidence:
+                                    logger.info(f"⏭️ Sinal NEUTRO: Confiança {ml_confidence:.2%} < {self.min_confidence:.2%} (mínimo)")
+                                else:
+                                    logger.info(f"⏭️ Sinal NEUTRO: Probabilidade {pred:.4f} muito próxima do threshold {self.optimal_threshold:.4f}")
 
                         except Exception as e:
                             logger.error(f"Prediction error: {e}")
