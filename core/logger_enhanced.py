@@ -249,6 +249,12 @@ class EnhancedLogger:
         """Success message"""
         print(f"  {Colors.GREEN}✅ {message}{Colors.RESET}")
 
+
+
+    def debug(self, message: str):
+        """Log debug message (dimmed)."""
+        timestamp = self._format_time()
+        print(f"{Colors.DIM}[{timestamp}] 🐛 {message}{Colors.RESET}")
     def warning(self, message: str):
         """Warning message"""
         print(f"  {Colors.YELLOW}⚠️  {message}{Colors.RESET}")
