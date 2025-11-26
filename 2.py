@@ -1,7 +1,7 @@
 """
-VALIDAÇÃO COM COOLDOWN REDUZIDO (1 CANDLE)
-Versão do 1.py com cooldown de apenas 1 candle para testar overtrading vs oportunidades
-Diferença: cooldown = 1 (15min) vs 1.py com cooldown = 4 (60min)
+VALIDAÇÃO SEM COOLDOWN
+Versão do backtest sem cooldown entre trades - permite abertura imediata após fechar posição
+Ideal para testar máximo de oportunidades e evitar perder sinais válidos
 """
 
 import sys
@@ -949,15 +949,11 @@ class StrategyValidator:
         trades = []
         position = None
         capital = self.initial_capital
-        cooldown = 0
 
         # Backtest simulation starting (logs suppressed for clean output)
 
         for i in range(len(df)):
             current = df.iloc[i]
-
-            if cooldown > 0:
-                cooldown -= 1
 
             # Check exit
             if position:
@@ -967,10 +963,9 @@ class StrategyValidator:
                     trades.append(trade)
                     capital += trade['pnl_amount']
                     position = None
-                    cooldown = 1  # REDUZIDO: 1 candle (15min) vs 4 candles (60min) no 1.py
 
-            # Check entry
-            if not position and current['signal'] != 0 and cooldown == 0 and i < len(df) - 20:
+            # Check entry (SEM COOLDOWN)
+            if not position and current['signal'] != 0 and i < len(df) - 20:
                 position = self._open_trade(current, capital, i)
 
         # Close final position
