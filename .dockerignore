@@ -9,9 +9,12 @@ venv/
 .git
 .gitignore
 *.log
-storage/
+storage/cache/
+storage/logs/
+storage/data/
 logs/
 .DS_Store
 *.ipynb
 .vscode/
 .idea/
+!storage/models/
