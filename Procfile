@@ -1,1 +1,1 @@
-worker: python3 live_bot.py
+worker: python3 live_bot_websocket.py
