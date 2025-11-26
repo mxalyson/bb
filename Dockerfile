@@ -33,4 +33,4 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
 # Run the trading bot
-CMD ["python", "-u", "live_bot.py"]
+CMD ["python", "-u", "live_bot_websocket.py"]
