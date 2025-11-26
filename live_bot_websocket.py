@@ -1,0 +1,2421 @@
+"""
+🤖 LIVE TRADING BOT - SNIPER MODE
+Baseado na análise de otimização do 1.py
+"""
+
+import sys
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+sys.path.append(str(Path(__file__).parent))
+
+import pandas as pd
+import numpy as np
+import logging
+import pickle
+import time
+import requests
+import json
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+from pathlib import Path as PathLib
+import os
+from dotenv import load_dotenv
+import websocket
+import threading
+
+from core.utils import load_config, setup_logging
+from core.bybit_rest import BybitRESTClient
+from core.data import DataManager
+from core.features import FeatureStore
+from decimal import Decimal, ROUND_DOWN, getcontext
+
+# Load environment variables
+load_dotenv()
+
+logger = None
+getcontext().prec = 28
+
+# ================================================================================
+# ENHANCED LOGGER
+# ================================================================================
+
+"""
+Enhanced Logger with Beautiful Formatting
+"""
+
+import logging
+from datetime import datetime
+from typing import Optional
+import sys
+
+class Colors:
+    """ANSI color codes for terminal"""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+
+    # Colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
+    # Bright colors
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_WHITE = '\033[97m'
+
+    # Backgrounds
+    BG_RED = '\033[41m'
+    BG_GREEN = '\033[42m'
+    BG_YELLOW = '\033[43m'
+    BG_BLUE = '\033[44m'
+
+
+class EnhancedLogger:
+    """Beautiful, informative logger for trading bot"""
+
+    def __init__(self, name: str = "TradingBot"):
+        self.logger = logging.getLogger(name)
+        self.name = name
+
+    def _format_time(self) -> str:
+        """Format current time"""
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _print_box(self, text: str, color: str = Colors.CYAN, width: int = 80):
+        """Print text in a box"""
+        border = "═" * width
+        print(f"{color}╔{border}╗{Colors.RESET}")
+
+        # Center text
+        padding = (width - len(text)) // 2
+        line = " " * padding + text + " " * (width - padding - len(text))
+        print(f"{color}║{Colors.RESET}{Colors.BOLD}{line}{Colors.RESET}{color}║{Colors.RESET}")
+
+        print(f"{color}╚{border}╝{Colors.RESET}")
+
+    def _print_section(self, title: str, color: str = Colors.BLUE, width: int = 80):
+        """Print section header"""
+        border = "─" * (width - len(title) - 4)
+        print(f"\n{color}{Colors.BOLD}┌─ {title} {border}┐{Colors.RESET}")
+
+    def _print_section_end(self, width: int = 80):
+        """Print section footer"""
+        print(f"{Colors.BLUE}└{'─' * width}┘{Colors.RESET}\n")
+
+    def startup(self, config: dict):
+        """Beautiful startup banner"""
+        print("\n" * 2)
+        self._print_box("🤖 TRADING BOT LIVE", Colors.BRIGHT_CYAN, 60)
+        print()
+
+        # Config table
+        self._print_section("⚙️  CONFIGURATION", Colors.BRIGHT_BLUE, 60)
+
+        rows = [
+            ("Symbol", config.get('symbol', 'N/A'), Colors.CYAN),
+            ("Timeframe", f"{config.get('timeframe', 'N/A')}m", Colors.CYAN),
+            ("Model", config.get('model', 'N/A'), Colors.GREEN),
+            ("Min Confidence", f"{config.get('min_confidence', 0)*100:.0f}%", Colors.YELLOW),
+            ("Risk per Trade", f"{config.get('risk_per_trade', 0)*100:.2f}%", Colors.YELLOW),
+            ("Stop Loss", f"{config.get('sl_atr_mult', 0):.1f}x ATR", Colors.RED),
+            ("Take Profit", f"{config.get('tp_atr_mult', 0):.1f}x ATR", Colors.GREEN),
+            ("Trade Cooldown", f"{config.get('trade_cooldown', 0)/60:.0f} min", Colors.MAGENTA),
+        ]
+
+        for label, value, color in rows:
+            print(f"  {Colors.DIM}{label}:{Colors.RESET} {color}{Colors.BOLD}{value}{Colors.RESET}")
+
+        self._print_section_end(60)
+
+        # Mode warning
+        mode = config.get('mode', 'DRY RUN')
+        network = config.get('network', 'TESTNET')
+
+        if mode == 'LIVE' and network == 'MAINNET':
+            self._print_box("⚠️  REAL TRADING MODE - MAINNET ⚠️", Colors.BG_RED + Colors.BRIGHT_WHITE, 60)
+        elif mode == 'LIVE':
+            print(f"{Colors.YELLOW}{'─' * 60}{Colors.RESET}")
+            print(f"{Colors.YELLOW}  🔴 LIVE TRADING - {network}{Colors.RESET}")
+            print(f"{Colors.YELLOW}{'─' * 60}{Colors.RESET}")
+        else:
+            print(f"{Colors.BLUE}{'─' * 60}{Colors.RESET}")
+            print(f"{Colors.BLUE}  🔵 DRY RUN MODE - {network}{Colors.RESET}")
+            print(f"{Colors.BLUE}{'─' * 60}{Colors.RESET}")
+
+        print("\n")
+
+    def candle_detected(self, candle_time: datetime, price: float, wait_time: int = 60):
+        """New candle detected"""
+        print(f"\n{Colors.BRIGHT_GREEN}{'━' * 80}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_GREEN}{Colors.BOLD}🆕 NEW CANDLE DETECTED{Colors.RESET}")
+        print(f"{Colors.BRIGHT_GREEN}{'━' * 80}{Colors.RESET}")
+        print(f"  ⏰ Time:  {Colors.CYAN}{candle_time}{Colors.RESET}")
+        print(f"  💰 Price: {Colors.YELLOW}${price:,.2f}{Colors.RESET}")
+        print(f"  ⏳ Waiting {Colors.MAGENTA}{wait_time}s{Colors.RESET} for API consolidation...")
+        print(f"{Colors.BRIGHT_GREEN}{'━' * 80}{Colors.RESET}\n")
+
+    def prediction(self, data: dict):
+        """Beautiful prediction display"""
+        pred = data.get('prediction', 0)
+        conf = data.get('confidence', 0)
+        signal = data.get('signal', 'NEUTRO')
+        threshold = data.get('threshold', 0.5)
+        min_conf = data.get('min_confidence', 0)
+
+        # Signal color
+        if signal == 'LONG':
+            signal_color = Colors.BRIGHT_GREEN
+            signal_emoji = "🟢"
+        elif signal == 'SHORT':
+            signal_color = Colors.BRIGHT_RED
+            signal_emoji = "🔴"
+        else:
+            signal_color = Colors.YELLOW
+            signal_emoji = "⚪"
+
+        print(f"\n{Colors.BRIGHT_CYAN}{'═' * 80}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}🔮 PREDICTION{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{'═' * 80}{Colors.RESET}")
+
+        # Prediction bar
+        bar_width = 50
+        pred_pos = int(pred * bar_width)
+        threshold_pos = int(threshold * bar_width)
+
+        bar = ""
+        for i in range(bar_width):
+            if i == threshold_pos:
+                bar += f"{Colors.YELLOW}|{Colors.RESET}"
+            elif i < pred_pos:
+                if pred > threshold:
+                    bar += f"{Colors.GREEN}█{Colors.RESET}"
+                else:
+                    bar += f"{Colors.RED}█{Colors.RESET}"
+            else:
+                bar += f"{Colors.DIM}░{Colors.RESET}"
+
+        print(f"\n  {bar}")
+        print(f"  {Colors.DIM}0%{' ' * 44}50%{' ' * 42}100%{Colors.RESET}")
+
+        print(f"\n  📊 Probability: {Colors.BOLD}{pred:.4f}{Colors.RESET} ({pred*100:.1f}%)")
+        print(f"  🎯 Threshold:   {Colors.YELLOW}{threshold:.4f}{Colors.RESET} ({threshold*100:.0f}%)")
+        print(f"  📈 Confidence:  {Colors.BOLD}{conf:.1f}%{Colors.RESET}")
+        print(f"  🎲 Signal:      {signal_color}{Colors.BOLD}{signal_emoji} {signal}{Colors.RESET}")
+
+        if conf < min_conf:
+            print(f"\n  {Colors.RED}❌ FILTERED{Colors.RESET}: Confidence {conf:.1f}% < {min_conf:.0f}% (minimum)")
+        else:
+            print(f"\n  {Colors.GREEN}✅ VALID{Colors.RESET}: Confidence {conf:.1f}% ≥ {min_conf:.0f}%")
+
+        print(f"{Colors.BRIGHT_CYAN}{'═' * 80}{Colors.RESET}\n")
+
+    def trade_opened(self, data: dict):
+        """Trade opened notification"""
+        direction = data.get('direction', 'UNKNOWN')
+        entry = data.get('entry_price', 0)
+        size = data.get('size', 0)
+        sl = data.get('stop_loss', 0)
+        tp = data.get('take_profit', 0)
+
+        color = Colors.BRIGHT_GREEN if direction == 'LONG' else Colors.BRIGHT_RED
+        emoji = "🟢" if direction == 'LONG' else "🔴"
+
+        print(f"\n{color}{'━' * 80}{Colors.RESET}")
+        print(f"{color}{Colors.BOLD}{emoji} TRADE OPENED - {direction.upper()}{Colors.RESET}")
+        print(f"{color}{'━' * 80}{Colors.RESET}")
+        print(f"  💰 Entry:  {Colors.YELLOW}${entry:,.2f}{Colors.RESET}")
+        print(f"  📏 Size:   {Colors.CYAN}{size:.4f} BTC{Colors.RESET}")
+        print(f"  🛑 SL:     {Colors.RED}${sl:,.2f}{Colors.RESET} ({((sl-entry)/entry*100):+.2f}%)")
+        print(f"  🎯 TP:     {Colors.GREEN}${tp:,.2f}{Colors.RESET} ({((tp-entry)/entry*100):+.2f}%)")
+        print(f"{color}{'━' * 80}{Colors.RESET}\n")
+
+    def trade_closed(self, data: dict):
+        """Trade closed notification"""
+        direction = data.get('direction', 'UNKNOWN')
+        entry = data.get('entry_price', 0)
+        exit_price = data.get('exit_price', 0)
+        pnl = data.get('pnl', 0)
+        pnl_pct = data.get('pnl_pct', 0)
+        reason = data.get('reason', 'Unknown')
+
+        color = Colors.BRIGHT_GREEN if pnl > 0 else Colors.BRIGHT_RED
+        emoji = "✅" if pnl > 0 else "❌"
+
+        print(f"\n{color}{'━' * 80}{Colors.RESET}")
+        print(f"{color}{Colors.BOLD}{emoji} TRADE CLOSED - {reason.upper()}{Colors.RESET}")
+        print(f"{color}{'━' * 80}{Colors.RESET}")
+        print(f"  📍 Direction: {direction.upper()}")
+        print(f"  💵 Entry:     ${entry:,.2f}")
+        print(f"  💵 Exit:      ${exit_price:,.2f}")
+        print(f"  💰 PnL:       {color}{Colors.BOLD}${pnl:+,.2f} ({pnl_pct:+.2f}%){Colors.RESET}")
+        print(f"{color}{'━' * 80}{Colors.RESET}\n")
+
+    def position_status(self, data: dict):
+        """Current position status"""
+        direction = data.get('direction', 'UNKNOWN')
+        entry = data.get('entry_price', 0)
+        current = data.get('current_price', 0)
+        pnl_pct = data.get('pnl_pct', 0)
+        sl = data.get('stop_loss', 0)
+        tp = data.get('take_profit', 0)
+
+        color = Colors.GREEN if pnl_pct > 0 else Colors.RED
+        emoji = "🟢" if direction == 'LONG' else "🔴"
+
+        print(f"  {emoji} {direction.upper()} @ ${entry:,.2f} | Current: ${current:,.2f} | PnL: {color}{pnl_pct:+.2f}%{Colors.RESET}")
+
+    def error(self, message: str):
+        """Error message"""
+        print(f"\n{Colors.BRIGHT_RED}{'!' * 80}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}{Colors.BOLD}❌ ERROR{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}{'!' * 80}{Colors.RESET}")
+        print(f"  {Colors.RED}{message}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}{'!' * 80}{Colors.RESET}\n")
+
+    def info(self, message: str, emoji: str = "ℹ️"):
+        """Info message"""
+        print(f"  {emoji} {message}")
+
+    def success(self, message: str):
+        """Success message"""
+        print(f"  {Colors.GREEN}✅ {message}{Colors.RESET}")
+
+
+
+    def debug(self, message: str):
+        """Log debug message (dimmed)."""
+        timestamp = self._format_time()
+        print(f"{Colors.DIM}[{timestamp}] 🐛 {message}{Colors.RESET}")
+    def warning(self, message: str):
+        """Warning message"""
+        print(f"  {Colors.YELLOW}⚠️  {message}{Colors.RESET}")
+
+    def progress(self, current: int, total: int, prefix: str = "Progress"):
+        """Progress bar"""
+        bar_width = 40
+        progress = current / total
+        filled = int(bar_width * progress)
+
+        bar = f"{Colors.GREEN}{'█' * filled}{Colors.DIM}{'░' * (bar_width - filled)}{Colors.RESET}"
+        percent = progress * 100
+
+        print(f"\r  {prefix}: {bar} {percent:.0f}%", end='', flush=True)
+
+        if current == total:
+            print()  # New line when complete
+
+    def waiting(self, message: str, seconds: int):
+        """Waiting message with countdown"""
+        print(f"  {Colors.MAGENTA}⏳ {message}{Colors.RESET}")
+
+        for i in range(seconds, 0, -1):
+            print(f"\r  {Colors.DIM}   {i}s remaining...{Colors.RESET}", end='', flush=True)
+            import time
+            time.sleep(1)
+
+        print(f"\r  {Colors.GREEN}   ✓ Done!{Colors.RESET}          ")
+
+
+# Singleton instance
+_enhanced_logger = None
+
+def get_enhanced_logger(name: str = "TradingBot") -> EnhancedLogger:
+    """Get enhanced logger singleton"""
+    global _enhanced_logger
+    if _enhanced_logger is None:
+        _enhanced_logger = EnhancedLogger(name)
+    return _enhanced_logger
+
+
+# Global display instance
+display = EnhancedLogger('TradingBot')
+
+
+
+# ============================================================================
+# WEBSOCKET HANDLER
+# ============================================================================
+
+class BybitWebSocketHandler:
+    """Real-time candle detection via WebSocket."""
+
+    def __init__(self, symbol, timeframe, on_candle_close_callback):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.on_candle_close = on_candle_close_callback
+        self.ws = None
+        self.ws_thread = None
+        self.running = False
+        self.connected = False
+        self.last_confirmed_candle_time = None
+        self.reconnect_delay = 1.0
+        self.max_reconnect_delay = 60.0
+        display.info("📡 WebSocket handler created")
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.ws_thread = threading.Thread(target=self._run, daemon=True)
+        self.ws_thread.start()
+        display.info("🚀 WebSocket started")
+
+    def stop(self):
+        self.running = False
+        if self.ws:
+            self.ws.close()
+        display.info("🛑 WebSocket stopped")
+
+    def _run(self):
+        while self.running:
+            try:
+                self._connect()
+            except Exception as e:
+                if self.running:
+                    display.warning(f"🔄 WS reconnect in {self.reconnect_delay:.0f}s")
+                    time.sleep(self.reconnect_delay)
+                    self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+
+    def _connect(self):
+        url = "wss://stream.bybit.com/v5/public/linear"
+        self.ws = websocket.WebSocketApp(url, on_open=self._on_open, on_message=self._on_message, 
+                                          on_error=self._on_error, on_close=self._on_close)
+        self.ws.run_forever()
+
+    def _on_open(self, ws):
+        self.connected = True
+        self.reconnect_delay = 1.0
+        ws.send(json.dumps({"op": "subscribe", "args": [f"kline.{self.timeframe}.{self.symbol}"]}))
+        display.info(f"✅ Subscribed: kline.{self.timeframe}.{self.symbol}")
+
+    def _on_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            if 'topic' in data and 'kline' in data['topic']:
+                kline_list = data.get('data', [])
+                if kline_list:
+                    kline = kline_list[0]
+                    if kline.get('confirm', False):
+                        ct = datetime.fromtimestamp(kline.get('start', 0) / 1000)
+                        if ct != self.last_confirmed_candle_time:
+                            self.last_confirmed_candle_time = ct
+                            cdata = {'time': ct, 'close': float(kline.get('close', 0))}
+                            display.info(f"🕐 WS: Candle @ {ct} | ${cdata['close']:,.2f}")
+                            if self.on_candle_close:
+                                self.on_candle_close(cdata)
+        except:
+            pass
+
+    def _on_error(self, ws, error):
+        self.connected = False
+
+    def _on_close(self, ws, code, msg):
+        self.connected = False
+        display.warning("📡 WS disconnected")
+
+
+# ============================================================================
+# BYBIT HELPERS (tick/step rounding + market meta)
+# ============================================================================
+
+def _to_decimal(x):
+    """Convert to Decimal safely."""
+    try:
+        return Decimal(str(x))
+    except:
+        return Decimal(0)
+
+
+def round_to_step(value: float, step: float) -> float:
+    """Round value to step size."""
+    step_d = _to_decimal(step)
+    if step_d <= 0:
+        return float(value)
+    v = _to_decimal(value)
+    q = (v // step_d) * step_d
+    return float(q)
+
+
+def round_price(value: float, tick: float) -> float:
+    """Round price to tick size."""
+    return round_to_step(value, tick)
+
+
+def round_qty(value: float, step: float, min_qty: float) -> float:
+    """Round quantity to step size, ensuring minimum."""
+    q = round_to_step(value, step)
+    if q < min_qty:
+        q = _to_decimal(min_qty)
+    return float(q)
+
+
+def fetch_market_meta(rest_client, symbol: str):
+    """
+    Fetch tickSize, qtyStep, minOrderQty from exchange.
+    Fallbacks for BTCUSDT/ETHUSDT if API fails.
+    """
+    # Default values by symbol
+    if 'ETH' in symbol:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+    elif 'BTC' in symbol:
+        tick = 0.1
+        step = 0.001
+        min_qty = 0.001
+    else:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+
+    try:
+        meta = rest_client.get_instruments_info(symbol=symbol)
+
+        if meta and meta.get('retCode') == 0:
+            lst = meta.get('result', {}).get('list', [])
+            if lst:
+                info = lst[0]
+                if 'priceFilter' in info and 'tickSize' in info['priceFilter']:
+                    tick = float(info['priceFilter']['tickSize'])
+                if 'lotSizeFilter' in info:
+                    lf = info['lotSizeFilter']
+                    if 'qtyStep' in lf:
+                        step = float(lf['qtyStep'])
+                    if 'minOrderQty' in lf:
+                        min_qty = float(lf['minOrderQty'])
+                display.info(f"   ✅ Market meta: tick={tick}, step={step}, min_qty={min_qty}")
+        else:
+            display.warning(f"   ⚠️ API error, using fallback")
+    except Exception as e:
+        display.warning(f"   ⚠️ fetch_market_meta error: {e}, using fallback")
+
+    return tick, step, min_qty
+
+
+def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0):
+    """Execute function with exponential backoff retry."""
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                display.warning(f"   Retry {attempt + 1}/{max_retries} failed: {e}. Waiting {delay}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, 16.0)
+            else:
+                display.error(f"   All {max_retries} retries failed: {e}")
+    return None
+
+
+# ============================================================================
+# TELEGRAM NOTIFICATIONS
+# ============================================================================
+
+class TelegramNotifier:
+    """Send notifications to Telegram with interactive commands support."""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.enabled = bool(bot_token and chat_id)
+        self.last_update_id = 0  # Track last processed update
+        self.bot_instance = None  # Reference to TradingBot for commands
+
+        if self.enabled:
+            display.info("📱 Telegram notifications: ENABLED")
+            display.info("📱 Telegram commands: ENABLED (/help para listar)")
+        else:
+            display.warning("📱 Telegram notifications: DISABLED (missing credentials)")
+
+    def set_bot_instance(self, bot_instance):
+        """Set reference to TradingBot for command execution."""
+        self.bot_instance = bot_instance
+
+    def send(self, message: str):
+        """Send message to Telegram."""
+        if not self.enabled:
+            return
+
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            data = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            response = requests.post(url, data=data, timeout=10)
+
+            if response.status_code != 200:
+                display.warning(f"Telegram error: {response.text}")
+        except Exception as e:
+            display.error(f"Failed to send Telegram: {e}")
+
+    def get_updates(self):
+        """Get new updates from Telegram."""
+        if not self.enabled:
+            return []
+
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            params = {
+                "offset": self.last_update_id + 1,
+                "timeout": 1,
+                "allowed_updates": ["message"]
+            }
+            response = requests.get(url, params=params, timeout=5)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    updates = data.get("result", [])
+                    if updates:
+                        self.last_update_id = updates[-1]["update_id"]
+                    return updates
+        except Exception as e:
+            display.debug(f"Error getting Telegram updates: {e}")
+
+        return []
+
+    def process_command(self, command: str, args: list):
+        """Process Telegram command and return response."""
+        if not self.bot_instance:
+            return "❌ Bot not initialized"
+
+        bot = self.bot_instance
+
+        # Help command
+        if command == "/help":
+            return (
+                "🤖 <b>Comandos Disponíveis:</b>\n\n"
+                "<b>📊 Informações:</b>\n"
+                "/status - Status geral do bot\n"
+                "/config - Ver todas configurações\n"
+                "/position - Posição aberta atual\n"
+                "/capital - Capital atual\n\n"
+                "<b>⚙️ Controle:</b>\n"
+                "/pause - Pausar bot (não abre novos trades)\n"
+                "/resume - Retomar bot\n"
+                "/forcecheck - Forçar verificação de novo candle\n\n"
+                "<b>🔧 Configuração:</b>\n"
+                "/setconf &lt;0-100&gt; - Confiança mínima (%)\n"
+                "/setrisk &lt;0.1-2.0&gt; - Risco por trade (%)\n"
+                "/setsl &lt;1-10&gt; - Stop Loss (x ATR)\n"
+                "/settp &lt;1-20&gt; - Take Profit (x ATR)\n"
+                "/setcooldown &lt;5-120&gt; - Cooldown entre trades (min)"
+            )
+
+        # Status command
+        elif command == "/status":
+            mode = "🔵 DRY RUN" if bot.dry_run else "🔴 LIVE"
+            network = "TESTNET" if bot.bybit_testnet else "MAINNET"
+            paused = "⏸️ PAUSADO" if hasattr(bot, 'paused') and bot.paused else "▶️ ATIVO"
+
+            return (
+                f"🤖 <b>Status do Bot</b>\n\n"
+                f"Estado: {paused}\n"
+                f"Modo: {mode}\n"
+                f"Network: {network}\n"
+                f"Symbol: {bot.symbol}\n"
+                f"Timeframe: {bot.timeframe}m\n\n"
+                f"⚙️ Config:\n"
+                f"Confiança Min: {bot.min_confidence*100:.0f}%\n"
+                f"Risco/Trade: {bot.risk_per_trade*100:.2f}%\n"
+                f"SL: {bot.sl_atr_mult}x ATR\n"
+                f"TP: {bot.tp_atr_mult}x ATR\n"
+                f"Cooldown: {bot.trade_cooldown/60:.0f}min"
+            )
+
+        # Position command
+        elif command == "/position":
+            if not bot.position:
+                return "📭 Nenhuma posição aberta"
+
+            pos = bot.position
+            direction_emoji = "🟢" if pos['direction'] == 'long' else "🔴"
+
+            # Calculate current PnL if we have last price
+            if bot.last_price:
+                if pos['direction'] == 'long':
+                    pnl_pct = ((bot.last_price - pos['entry_price']) / pos['entry_price']) * 100
+                else:
+                    pnl_pct = ((pos['entry_price'] - bot.last_price) / pos['entry_price']) * 100
+
+                pnl_usd = pos['size'] * (pnl_pct / 100)
+                fee = pos['size'] * 0.00055 * 2
+                pnl_net = pnl_usd - fee
+                pnl_emoji = "🟢" if pnl_net > 0 else "🔴"
+            else:
+                pnl_emoji = "⚪"
+                pnl_pct = 0
+                pnl_net = 0
+
+            duration = datetime.now() - pos['entry_time']
+            hours = int(duration.total_seconds() / 3600)
+            minutes = int((duration.total_seconds() % 3600) / 60)
+
+            return (
+                f"{direction_emoji} <b>Posição {pos['direction'].upper()}</b>\n\n"
+                f"Entrada: ${pos['entry_price']:,.2f}\n"
+                f"Atual: ${bot.last_price:,.2f}\n"
+                f"Qtd: {pos['qty_btc']} BTC\n\n"
+                f"{pnl_emoji} PnL: {pnl_pct:+.2f}% (${pnl_net:+,.2f})\n"
+                f"Duração: {hours}h {minutes}m\n\n"
+                f"🛑 SL: ${pos['stop_loss']:,.2f}\n"
+                f"🎯 TP: ${pos['take_profit']:,.2f}\n"
+                f"📊 Confiança: {pos.get('confidence', 0)*100:.0f}%"
+            )
+
+        # Capital command
+        elif command == "/capital":
+            return (
+                f"💰 <b>Capital</b>\n\n"
+                f"Atual: ${bot.capital:,.2f}\n"
+                f"Inicial: ${bot.initial_capital:,.2f}\n"
+                f"Variação: {((bot.capital/bot.initial_capital - 1)*100):+.2f}%"
+            )
+
+        # Pause command
+        elif command == "/pause":
+            if not hasattr(bot, 'paused'):
+                bot.paused = False
+
+            if bot.paused:
+                return "⏸️ Bot já está pausado"
+
+            bot.paused = True
+            display.info("⏸️ Bot pausado via Telegram")
+            return "⏸️ <b>Bot Pausado</b>\n\nNão abrirá novos trades.\nPosições abertas continuam sendo monitoradas.\n\nUse /resume para retomar."
+
+        # Resume command
+        elif command == "/resume":
+            if not hasattr(bot, 'paused'):
+                bot.paused = False
+                return "▶️ Bot já está ativo"
+
+            if not bot.paused:
+                return "▶️ Bot já está ativo"
+
+            bot.paused = False
+            display.info("▶️ Bot retomado via Telegram")
+            return "▶️ <b>Bot Retomado</b>\n\nVoltará a abrir trades conforme sinais."
+
+        # Set confidence command
+        elif command == "/setconf":
+            if not args:
+                return "❌ Uso: /setconf &lt;valor&gt;\n\nExemplo: /setconf 40"
+
+            try:
+                new_conf = float(args[0])
+                if not (0 <= new_conf <= 100):
+                    return "❌ Confiança deve estar entre 0 e 100"
+
+                old_conf = bot.min_confidence * 100
+                bot.min_confidence = new_conf / 100
+                display.info(f"⚙️ Confiança alterada via Telegram: {old_conf:.0f}% → {new_conf:.0f}%")
+
+                return f"✅ <b>Confiança Atualizada</b>\n\n{old_conf:.0f}% → {new_conf:.0f}%"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 0 e 100."
+
+        # Set risk command
+        elif command == "/setrisk":
+            if not args:
+                return "❌ Uso: /setrisk &lt;valor&gt;\n\nExemplo: /setrisk 0.75"
+
+            try:
+                new_risk = float(args[0])
+                if not (0.1 <= new_risk <= 2.0):
+                    return "❌ Risco deve estar entre 0.1 e 2.0"
+
+                old_risk = bot.risk_per_trade * 100
+                bot.risk_per_trade = new_risk / 100
+                display.info(f"⚙️ Risco alterado via Telegram: {old_risk:.2f}% → {new_risk:.2f}%")
+
+                return f"✅ <b>Risco Atualizado</b>\n\n{old_risk:.2f}% → {new_risk:.2f}%"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 0.1 e 2.0."
+
+        # Set SL command
+        elif command == "/setsl":
+            if not args:
+                return "❌ Uso: /setsl &lt;valor&gt;\n\nExemplo: /setsl 3.5"
+
+            try:
+                new_sl = float(args[0])
+                if not (1.0 <= new_sl <= 10.0):
+                    return "❌ SL deve estar entre 1.0 e 10.0 (x ATR)"
+
+                old_sl = bot.sl_atr_mult
+                bot.sl_atr_mult = new_sl
+                display.info(f"⚙️ SL alterado via Telegram: {old_sl:.1f}x → {new_sl:.1f}x ATR")
+
+                return f"✅ <b>Stop Loss Atualizado</b>\n\n{old_sl:.1f}x → {new_sl:.1f}x ATR"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 1.0 e 10.0."
+
+        # Set TP command
+        elif command == "/settp":
+            if not args:
+                return "❌ Uso: /settp &lt;valor&gt;\n\nExemplo: /settp 5.0"
+
+            try:
+                new_tp = float(args[0])
+                if not (1.0 <= new_tp <= 20.0):
+                    return "❌ TP deve estar entre 1.0 e 20.0 (x ATR)"
+
+                old_tp = bot.tp_atr_mult
+                bot.tp_atr_mult = new_tp
+                display.info(f"⚙️ TP alterado via Telegram: {old_tp:.1f}x → {new_tp:.1f}x ATR")
+
+                return f"✅ <b>Take Profit Atualizado</b>\n\n{old_tp:.1f}x → {new_tp:.1f}x ATR"
+            except ValueError:
+                return "❌ Valor inválido. Use um número entre 1.0 e 20.0."
+
+        # Set cooldown command
+        elif command == "/setcooldown":
+            if not args:
+                return "❌ Uso: /setcooldown &lt;minutos&gt;\n\nExemplo: /setcooldown 30"
+
+            try:
+                new_cooldown_min = int(args[0])
+                if not (5 <= new_cooldown_min <= 120):
+                    return "❌ Cooldown deve estar entre 5 e 120 minutos"
+
+                old_cooldown_min = bot.trade_cooldown / 60
+                bot.trade_cooldown = new_cooldown_min * 60
+                display.info(f"⚙️ Cooldown alterado via Telegram: {old_cooldown_min:.0f}min → {new_cooldown_min}min")
+
+                return f"✅ <b>Cooldown Atualizado</b>\n\n{old_cooldown_min:.0f}min → {new_cooldown_min}min"
+            except ValueError:
+                return "❌ Valor inválido. Use um número inteiro entre 5 e 120."
+
+        # Config command - show all settings
+        elif command == "/config":
+            return (
+                f"⚙️ <b>Configurações Atuais</b>\n\n"
+                f"<b>Trading:</b>\n"
+                f"Confiança Min: {bot.min_confidence*100:.0f}%\n"
+                f"Risco/Trade: {bot.risk_per_trade*100:.2f}%\n"
+                f"Stop Loss: {bot.sl_atr_mult:.1f}x ATR\n"
+                f"Take Profit: {bot.tp_atr_mult:.1f}x ATR\n"
+                f"Cooldown: {bot.trade_cooldown/60:.0f}min\n\n"
+                f"<b>Modelo:</b>\n"
+                f"Threshold: {bot.optimal_threshold:.3f}\n"
+                f"Timeframe: {bot.timeframe}m\n\n"
+                f"<b>Sistema:</b>\n"
+                f"Modo: {'🔵 DRY RUN' if bot.dry_run else '🔴 LIVE'}\n"
+                f"Network: {'TESTNET' if bot.bybit_testnet else 'MAINNET'}\n"
+                f"Estado: {'⏸️ PAUSADO' if hasattr(bot, 'paused') and bot.paused else '▶️ ATIVO'}"
+            )
+
+        # Force check command
+        elif command == "/forcecheck":
+            # Mark last analyzed as None to force new analysis
+            bot.last_analyzed_candle_time = None
+            display.info("🔄 Forçando nova verificação via Telegram")
+            return "🔄 <b>Verificação Forçada</b>\n\nO bot verificará novo candle na próxima iteração."
+
+        else:
+            return f"❌ Comando desconhecido: {command}\n\nUse /help para ver comandos disponíveis."
+
+    def check_commands(self):
+        """Check for new commands and process them."""
+        if not self.enabled or not self.bot_instance:
+            return
+
+        updates = self.get_updates()
+
+        for update in updates:
+            if "message" in update and "text" in update["message"]:
+                text = update["message"]["text"].strip()
+
+                # Check if it's a command (starts with /)
+                if text.startswith("/"):
+                    parts = text.split()
+                    command = parts[0].lower()
+                    args = parts[1:] if len(parts) > 1 else []
+
+                    display.info(f"📱 Comando Telegram recebido: {command}")
+
+                    # Process command and send response
+                    response = self.process_command(command, args)
+                    self.send(response)
+
+
+# ============================================================================
+# MODEL LOADING (from 1.py)
+# ============================================================================
+
+class ModelWrapper:
+    """Generic wrapper for models saved with custom classes."""
+    def __init__(self, model=None, feature_names=None, **kwargs):
+        self.model = model
+        self.feature_names = feature_names
+        self.__dict__.update(kwargs)
+
+
+class UniversalUnpickler(pickle.Unpickler):
+    """Custom unpickler that can handle missing classes."""
+    def find_class(self, module, name):
+        if name == 'ModelWrapper':
+            return ModelWrapper
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            return type(name, (), {})
+
+
+def load_model_universal(model_path: str) -> dict:
+    """Universal model loader."""
+    display.info(f"🔍 Loading model: {model_path}")
+
+    try:
+        with open(model_path, 'rb') as f:
+            data = pickle.load(f)
+        display.info(f"   ✅ Loaded with standard pickle")
+    except Exception:
+        with open(model_path, 'rb') as f:
+            data = UniversalUnpickler(f).load()
+        display.info(f"   ✅ Loaded with custom unpickler")
+
+    result = {
+        'model': None,
+        'feature_names': None,
+        'optimal_threshold': 0.5,
+        'raw_data': data
+    }
+
+    data_type = type(data).__name__
+    display.info(f"   📦 Type: {data_type}")
+
+    # Extract model info
+    if isinstance(data, dict):
+        result['model'] = data.get('model')
+        result['feature_names'] = data.get('feature_names', [])
+        result['optimal_threshold'] = data.get('optimal_threshold', 0.5)
+    elif hasattr(data, 'models_list'):
+        result['model'] = data
+        result['feature_names'] = getattr(data, 'feature_columns', [])
+        result['optimal_threshold'] = getattr(data, 'long_threshold', 0.5)
+    else:
+        result['model'] = data
+        if hasattr(data, 'feature_names_in_'):
+            result['feature_names'] = list(data.feature_names_in_)
+
+    display.info(f"   📊 Features: {len(result['feature_names'])}")
+    display.info(f"   🎯 Threshold: {result['optimal_threshold']:.3f}")
+
+    return result
+
+
+# ============================================================================
+# FEATURE ENGINEERING (from 1.py)
+# ============================================================================
+
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add MASTER TRADER advanced features (matching train_master_scalper.py EXACTLY).
+
+    This function replicates the create_advanced_features() from train_master_scalper.py
+    to ensure bot generates SAME features as training.
+    """
+    display.info("   Creating advanced features (matching train_master_scalper.py)...")
+
+    df_features = df.copy()
+
+    # Multi-period momentum
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # Trend strength
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regimes
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position in recent range
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    # Volume momentum
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+
+    # Acceleration
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    display.info(f"   ✅ Advanced features added: {len(df_features.columns)} total columns")
+
+    return df_features
+
+
+def create_advanced_features_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add V2 ADVANCED features - MUST match train_master_scalper_v2.py exactly!
+    (Copied from 2.py for compatibility)
+    """
+    df_features = df.copy()
+
+    # === BASIC MOMENTUM (Multiple timeframes) ===
+    for period in [3, 5, 8, 13, 21, 34]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # === TREND STRENGTH ===
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+    df_features['trend_consistency'] = df_features['close'].rolling(20).apply(
+        lambda x: (x.iloc[-1] > x.iloc[0]) == (x.diff().mean() > 0)
+    )
+
+    # === VOLATILITY REGIME ===
+    df_features['volatility_regime'] = df_features['atr'] / df_features['atr'].rolling(50).mean()
+    df_features['volatility_change'] = df_features['atr'].pct_change(5)
+
+    # === PRICE POSITION IN RANGE ===
+    for period in [10, 20, 50]:
+        high_period = df_features['high'].rolling(period).max()
+        low_period = df_features['low'].rolling(period).min()
+        df_features[f'price_position_{period}'] = (
+            (df_features['close'] - low_period) / (high_period - low_period + 1e-8)
+        )
+
+    # === VOLUME ANALYSIS ===
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+    df_features['volume_acceleration'] = df_features['volume'].diff(2) - df_features['volume'].diff(1)
+    df_features['price_volume_corr'] = df_features['close'].rolling(20).corr(df_features['volume'])
+
+    # === ACCELERATION & JERK ===
+    df_features['price_velocity'] = df_features['close'].diff(1)
+    df_features['price_acceleration'] = df_features['price_velocity'].diff(1)
+    df_features['price_jerk'] = df_features['price_acceleration'].diff(1)
+
+    # === HIGHER ORDER MOMENTS ===
+    for period in [10, 20, 50]:
+        returns = df_features['close'].pct_change()
+        df_features[f'returns_skew_{period}'] = returns.rolling(period).skew()
+        df_features[f'returns_kurt_{period}'] = returns.rolling(period).kurt()
+        df_features[f'returns_std_{period}'] = returns.rolling(period).std()
+
+    # === MARKET MICROSTRUCTURE ===
+    df_features['spread_proxy'] = (df_features['high'] - df_features['low']) / df_features['close'] * 100
+
+    for period in [10, 20]:
+        ma = df_features['close'].rolling(period).mean()
+        df_features[f'price_efficiency_{period}'] = (df_features['close'] - ma) / ma * 100
+
+    # === REGIME DETECTION ===
+    df_features['adx_proxy'] = df_features['atr'] / df_features['close'] * 100
+    median_volume = df_features['volume'].rolling(100).median()
+    df_features['volume_regime'] = (df_features['volume'] > median_volume).astype(int)
+
+    # === RELATIVE STRENGTH ===
+    for period in [5, 10, 20]:
+        gains = df_features['close'].diff().clip(lower=0)
+        losses = -df_features['close'].diff().clip(upper=0)
+        avg_gain = gains.rolling(period).mean()
+        avg_loss = losses.rolling(period).mean()
+        rs = avg_gain / (avg_loss + 1e-8)
+        df_features[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+
+    # === MOMENTUM OSCILLATORS ===
+    for period in [5, 10, 20]:
+        df_features[f'roc_{period}'] = (
+            (df_features['close'] - df_features['close'].shift(period)) /
+            df_features['close'].shift(period) * 100
+        )
+
+    # === BOLLINGER BANDS FEATURES ===
+    for period in [20, 50]:
+        sma = df_features['close'].rolling(period).mean()
+        std = df_features['close'].rolling(period).std()
+        df_features[f'bb_position_{period}'] = (df_features['close'] - sma) / (2 * std + 1e-8)
+        df_features[f'bb_width_{period}'] = (4 * std) / sma * 100
+
+    # === CANDLE PATTERNS ===
+    body = abs(df_features['close'] - df_features['open'])
+    upper_shadow = df_features['high'] - df_features[['close', 'open']].max(axis=1)
+    lower_shadow = df_features[['close', 'open']].min(axis=1) - df_features['low']
+
+    df_features['body_size'] = body / df_features['close'] * 100
+    df_features['upper_shadow_ratio'] = upper_shadow / (body + 1e-8)
+    df_features['lower_shadow_ratio'] = lower_shadow / (body + 1e-8)
+
+    return df_features
+
+
+def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create features matching train_master_scalper.py.
+
+    This adds advanced features on top of FeatureStore features to ensure
+    compatibility with ml_model_master_scalper_365d.pkl.
+    """
+    display.info("   Creating advanced features (matching train_master_scalper.py)...")
+
+    df_feat = df.copy()
+
+    # Log initial columns
+    initial_cols = set(df_feat.columns)
+    display.info(f"   📊 Starting with {len(initial_cols)} columns from FeatureStore")
+
+    # === BASIC FEATURES ===
+    df_feat['returns'] = df_feat['close'].pct_change()
+    df_feat['returns_5'] = df_feat['close'].pct_change(5)
+    df_feat['returns_10'] = df_feat['close'].pct_change(10)
+
+    # Volatility
+    df_feat['volatility_5'] = df_feat['returns'].rolling(5).std()
+    df_feat['volatility_20'] = df_feat['returns'].rolling(20).std()
+    df_feat['volatility_ratio'] = df_feat['volatility_5'] / (df_feat['volatility_20'] + 1e-8)
+
+    # ATR
+    high_low = df_feat['high'] - df_feat['low']
+    high_close = abs(df_feat['high'] - df_feat['close'].shift())
+    low_close = abs(df_feat['low'] - df_feat['close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df_feat['atr'] = true_range.rolling(14).mean()
+    df_feat['atr_pct'] = df_feat['atr'] / df_feat['close'] * 100
+
+    # === MOMENTUM FEATURES ===
+    for period in [3, 5, 8, 13, 21]:
+        df_feat[f'momentum_{period}'] = df_feat['close'].pct_change(period) * 100
+
+    df_feat['momentum_accel'] = df_feat['momentum_5'].diff(3)
+
+    # === MOVING AVERAGES ===
+    for period in [7, 14, 21, 50, 100]:
+        df_feat[f'sma_{period}'] = df_feat['close'].rolling(period).mean()
+        df_feat[f'ema_{period}'] = df_feat['close'].ewm(span=period, adjust=False).mean()
+
+    df_feat['price_vs_sma7'] = (df_feat['close'] - df_feat['sma_7']) / df_feat['sma_7'] * 100
+    df_feat['price_vs_sma21'] = (df_feat['close'] - df_feat['sma_21']) / df_feat['sma_21'] * 100
+    df_feat['price_vs_ema14'] = (df_feat['close'] - df_feat['ema_14']) / df_feat['ema_14'] * 100
+
+    df_feat['sma7_above_sma21'] = (df_feat['sma_7'] > df_feat['sma_21']).astype(int)
+    df_feat['ema7_above_ema21'] = (df_feat['ema_7'] > df_feat['ema_21']).astype(int)
+
+    # === RSI ===
+    delta = df_feat['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
+    rs = gain / (loss + 1e-10)
+    df_feat['rsi'] = 100 - (100 / (1 + rs))
+
+    df_feat['rsi_oversold'] = (df_feat['rsi'] < 30).astype(int)
+    df_feat['rsi_overbought'] = (df_feat['rsi'] > 70).astype(int)
+    df_feat['rsi_neutral'] = ((df_feat['rsi'] >= 40) & (df_feat['rsi'] <= 60)).astype(int)
+
+    # === MACD ===
+    ema12 = df_feat['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_feat['close'].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    df_feat['macd_hist'] = macd - macd_signal
+    df_feat['macd_hist_increasing'] = (df_feat['macd_hist'] > df_feat['macd_hist'].shift(1)).astype(int)
+
+    # === BOLLINGER BANDS ===
+    sma20 = df_feat['close'].rolling(20).mean()
+    std20 = df_feat['close'].rolling(20).std()
+    df_feat['bb_upper'] = sma20 + (2 * std20)
+    df_feat['bb_lower'] = sma20 - (2 * std20)
+    df_feat['bb_width'] = (df_feat['bb_upper'] - df_feat['bb_lower']) / sma20 * 100
+    df_feat['bb_position'] = (df_feat['close'] - df_feat['bb_lower']) / (df_feat['bb_upper'] - df_feat['bb_lower'] + 1e-8)
+
+    # === VOLUME FEATURES ===
+    df_feat['volume_sma_20'] = df_feat['volume'].rolling(20).mean()
+    df_feat['volume_ratio'] = df_feat['volume'] / (df_feat['volume_sma_20'] + 1e-8)
+    df_feat['high_volume'] = (df_feat['volume_ratio'] > 1.5).astype(int)
+
+    # Volume ratios for different periods (needed by model)
+    for period in [3, 5, 8, 13, 21]:
+        vol_sma = df_feat['volume'].rolling(period).mean()
+        df_feat[f'volume_ratio_{period}'] = df_feat['volume'] / (vol_sma + 1e-8)
+
+    # Volume momentum
+    df_feat['volume_momentum'] = df_feat['volume'].pct_change(5)
+
+    # === CANDLE PATTERNS ===
+    body = abs(df_feat['close'] - df_feat['open'])
+    upper_wick = df_feat['high'] - df_feat[['close', 'open']].max(axis=1)
+    lower_wick = df_feat[['close', 'open']].min(axis=1) - df_feat['low']
+
+    df_feat['body_pct'] = body / df_feat['close'] * 100
+    df_feat['upper_wick_pct'] = upper_wick / df_feat['close'] * 100
+    df_feat['lower_wick_pct'] = lower_wick / df_feat['close'] * 100
+    df_feat['total_wick'] = upper_wick + lower_wick
+    df_feat['wick_body_ratio'] = df_feat['total_wick'] / (body + 1e-8)
+
+    is_green = (df_feat['close'] > df_feat['open']).astype(int)
+    is_red = (df_feat['close'] < df_feat['open']).astype(int)
+
+    df_feat['green_streak'] = (is_green * (is_green.groupby((is_green != is_green.shift()).cumsum()).cumcount() + 1))
+    df_feat['red_streak'] = (is_red * (is_red.groupby((is_red != is_red.shift()).cumsum()).cumcount() + 1))
+
+    # === PRICE ACTION ===
+    df_feat['higher_high'] = (df_feat['high'] > df_feat['high'].shift(1)).astype(int)
+    df_feat['lower_low'] = (df_feat['low'] < df_feat['low'].shift(1)).astype(int)
+    df_feat['hh_count'] = df_feat['higher_high'].rolling(10).sum()
+    df_feat['ll_count'] = df_feat['lower_low'].rolling(10).sum()
+
+    for period in [14, 50]:
+        high_period = df_feat['high'].rolling(period).max()
+        low_period = df_feat['low'].rolling(period).min()
+        df_feat[f'price_position_{period}'] = (df_feat['close'] - low_period) / (high_period - low_period + 1e-8)
+
+    # Price position (general) - needed by model
+    high_20 = df_feat['high'].rolling(20).max()
+    low_20 = df_feat['low'].rolling(20).min()
+    df_feat['price_position'] = (df_feat['close'] - low_20) / (high_20 - low_20 + 1e-8)
+
+    # Price acceleration - needed by model
+    df_feat['price_acceleration'] = df_feat['returns'].diff(3)
+
+    # Trend strength - needed by model
+    df_feat['trend_strength'] = abs(df_feat['close'] - df_feat['sma_21']) / df_feat['atr']
+
+    # Volatility regime - needed by model
+    current_vol = df_feat['volatility_20']
+    vol_ma = current_vol.rolling(50).mean()
+    df_feat['volatility_regime'] = current_vol / (vol_ma + 1e-8)
+
+    # === ORDER FLOW (simulated) ===
+    close_position = (df_feat['close'] - df_feat['low']) / (df_feat['high'] - df_feat['low'] + 1e-8)
+    df_feat['taker_buy_ratio'] = close_position
+    df_feat['taker_sell_ratio'] = 1 - close_position
+
+    df_feat['buy_pressure'] = df_feat['taker_buy_ratio'].rolling(20).mean()
+    df_feat['sell_pressure'] = df_feat['taker_sell_ratio'].rolling(20).mean()
+    df_feat['pressure_delta'] = df_feat['buy_pressure'] - df_feat['sell_pressure']
+
+    # Fill NaN
+    df_feat = df_feat.fillna(method='bfill').fillna(0)
+
+    # Log final columns
+    final_cols = set(df_feat.columns)
+    added_cols = final_cols - initial_cols
+    display.info(f"   ✅ Features created: {len(final_cols)} total ({len(added_cols)} added)")
+
+    # Save feature list to file for comparison
+    try:
+        with open('/tmp/live_bot_features.txt', 'w') as f:
+            for feat in sorted(df_feat.columns):
+                f.write(f"{feat}\n")
+        display.info(f"   📝 Feature list saved to /tmp/live_bot_features.txt")
+    except:
+        pass
+
+    return df_feat
+
+
+def make_prediction(model, model_data, df, feature_names):
+    """Make prediction using ensemble model."""
+
+    # 🔥 CRITICAL: Check for missing features
+    df_features = set(df.columns)
+    model_features = set(feature_names)
+    missing_features = model_features - df_features
+
+    if missing_features:
+        display.warning(f"⚠️ MISSING {len(missing_features)} FEATURES:")
+        for feat in list(missing_features)[:10]:
+            display.warning(f"   - {feat}")
+        if len(missing_features) > 10:
+            display.warning(f"   ... and {len(missing_features) - 10} more")
+
+        # Fill missing features with 0
+        for feat in missing_features:
+            df[feat] = 0
+        display.warning(f"⚠️ Filled missing features with 0 (may affect predictions!)")
+
+    # Check if using ModelWrapper ensemble
+    if hasattr(model, 'models_list'):
+        display.info("   🔄 Using ensemble prediction from ModelWrapper")
+
+        # Prepare features - ensure correct order
+        X = df[feature_names].fillna(0).values
+
+        # Apply scaler if exists
+        if hasattr(model, 'scaler') and model.scaler is not None:
+            X_scaled = model.scaler.transform(X)
+        else:
+            X_scaled = X
+
+        # Get predictions from all models
+        predictions = []
+        for i, sub_model in enumerate(model.models_list):
+            try:
+                # Check if deep learning model
+                model_type = type(sub_model).__name__
+                is_dl = model_type in ['Sequential', 'Functional', 'Model']
+
+                if is_dl:
+                    pred = sub_model.predict(X_scaled, verbose=0)
+                    if pred.ndim > 1:
+                        pred = pred[:, -1]
+                else:
+                    pred = sub_model.predict_proba(X_scaled)[:, 1]
+
+                predictions.append(pred)
+            except Exception as e:
+                display.warning(f"   ⚠️  Model {i} failed: {e}")
+                continue
+
+        if not predictions:
+            raise ValueError("All models failed!")
+
+        # Weighted average
+        if hasattr(model, 'model_weights'):
+            weights = np.array(model.model_weights[:len(predictions)])
+            weights = weights / weights.sum()
+        else:
+            weights = np.ones(len(predictions)) / len(predictions)
+
+        final_pred = np.zeros_like(predictions[0])
+        for pred, weight in zip(predictions, weights):
+            final_pred += pred * weight
+
+        display.info(f"   📊 Ensemble: {len(predictions)}/{len(model.models_list)} models succeeded")
+
+    else:
+        # Standard model
+        X = df[feature_names].fillna(0).values
+
+        if hasattr(model, 'predict_proba'):
+            final_pred = model.predict_proba(X)[:, 1]
+        else:
+            final_pred = model.predict(X)
+
+    return final_pred
+
+
+# ============================================================================
+# LIVE TRADING BOT
+# ============================================================================
+
+class LiveTradingBot:
+    """Live trading bot with sniper optimization."""
+
+    def __init__(self, config_path: str = 'config.yaml'):
+        global display
+
+        # Load config
+        self.config = load_config('standard')
+        pass  # Usando EnhancedLogger('INFO', log_to_file=True)
+
+        # Environment variables
+        self.symbol = os.getenv('SYMBOL', 'BTCUSDT')
+        self.timeframe = os.getenv('TIMEFRAME', '15')
+        self.model_path = os.getenv('MODEL_PATH', 'ml_model_master_scalper_365d.pkl')  # Modelo otimizado (2788% ROI em 365 dias)
+
+        # Trading parameters
+        self.min_confidence = float(os.getenv('MIN_ML_CONFIDENCE', '0.25'))
+        self.risk_per_trade = float(os.getenv('RISK_PER_TRADE_PCT', '0.75')) / 100
+        self.initial_capital = float(os.getenv('INITIAL_CAPITAL', '125.0'))
+
+        # Stop loss / Take profit multipliers
+        self.sl_atr_mult = float(os.getenv('SL_ATR_MULT', '2.0'))
+        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))  # Otimizado: 100% WR nos testes!
+
+        # Cooldown between trades (seconds)
+        self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
+
+        # Dry run mode
+        self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+
+        # Telegram
+        telegram_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        telegram_chat = os.getenv('TELEGRAM_CHAT_ID', '')
+        self.telegram = TelegramNotifier(telegram_token, telegram_chat)
+        self.telegram.set_bot_instance(self)  # Enable commands
+
+        # Control flags
+        self.paused = False  # Can be controlled via Telegram /pause
+
+        # Exchange client
+        self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
+        self.rest_client = BybitRESTClient(
+            api_key=os.getenv('BYBIT_API_KEY', ''),
+            api_secret=os.getenv('BYBIT_API_SECRET', ''),
+            testnet=self.bybit_testnet
+        )
+        self.data_manager = DataManager(self.rest_client)
+        self.feature_store = FeatureStore(self.config)
+
+        # Load model
+        self.model_data = load_model_universal(self.model_path)
+        self.model = self.model_data['model']
+        self.feature_names = self.model_data['feature_names']
+        self.optimal_threshold = self.model_data['optimal_threshold']
+
+        # Detect model version (same as 2.py)
+        self.model_version = self._detect_model_version()
+        display.info(f"📌 Detected model type: {self.model_version}")
+        display.info(f"   Required features: {len(self.feature_names)}")
+
+        # Fetch market meta (tick size, qty step, min qty)
+        display.info("📊 Fetching market metadata...")
+        try:
+            self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, self.symbol)
+        except Exception as e:
+            display.warning(f"   ⚠️ Error fetching market meta: {e}. Using fallback.")
+            # Fallback for BTCUSDT
+            self.tick_size = 0.1
+            self.qty_step = 0.001
+            self.min_qty = 0.001
+
+        # State
+        self.position: Optional[Dict] = None
+        self.last_trade_time: Optional[datetime] = None
+        self.capital = self.initial_capital
+        self.last_price: Optional[float] = None
+        self.last_analyzed_candle_time: Optional[datetime] = None  # Track last candle to avoid re-analysis
+
+        # State persistence file (unique per symbol)
+        symbol_clean = self.symbol.replace('USDT', '').lower()
+        self.state_file = PathLib(f'storage/bot_state_{symbol_clean}.json')
+
+        # Analysis control flag
+        self.analysis_in_progress = False
+        # WebSocket will be started after __init__ completes
+
+        # Load previous state (for cooldown persistence)
+        self._load_state()
+
+        display.info("=" * 80)
+        display.info("🤖 LIVE TRADING BOT - SNIPER MODE")
+        display.info("=" * 80)
+        display.info(f"Symbol: {self.symbol}")
+        display.info(f"Timeframe: {self.timeframe}m")
+        display.info(f"Model: {Path(self.model_path).name}")
+        display.info(f"Min Confidence: {self.min_confidence*100:.0f}%")
+        display.info(f"Risk per Trade: {self.risk_per_trade*100:.2f}%")
+        display.info(f"SL: {self.sl_atr_mult}x ATR | TP: {self.tp_atr_mult}x ATR")
+        display.info(f"Trade Cooldown: {self.trade_cooldown}s ({self.trade_cooldown/60:.1f}min)")
+        display.info(f"Mode: {'🔵 DRY RUN' if self.dry_run else '🔴 LIVE TRADING'}")
+        display.info(f"Exchange: {'TESTNET' if self.bybit_testnet else 'MAINNET'}")
+        display.info("=" * 80)
+
+        # Warning for live trading
+        if not self.dry_run and not self.bybit_testnet:
+            display.warning("⚠️" * 20)
+            display.warning("⚠️ REAL TRADING MODE ON MAINNET!")
+            display.warning("⚠️" * 20)
+
+        # Send startup notification
+        network = 'TESTNET' if self.bybit_testnet else 'MAINNET'
+        self.telegram.send(
+            f"🤖 <b>Bot Started</b>\n\n"
+            f"Symbol: {self.symbol}\n"
+            f"Timeframe: {self.timeframe}m\n"
+            f"Min Confidence: {self.min_confidence*100:.0f}%\n"
+            f"Risk: {self.risk_per_trade*100:.2f}%\n"
+            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}\n"
+            f"Network: {network}"
+        )
+
+    def _load_state(self):
+        """Load bot state from file to persist cooldown across restarts."""
+        try:
+            if self.state_file.exists():
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+
+                # Load last_trade_time if exists
+                if 'last_trade_time' in state and state['last_trade_time']:
+                    self.last_trade_time = datetime.fromisoformat(state['last_trade_time'])
+
+                    # Check if cooldown is still active
+                    if self.last_trade_time:
+                        time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
+                        if time_since_last < self.trade_cooldown:
+                            remaining = self.trade_cooldown - time_since_last
+                            display.info(f"⏰ Cooldown ativo do trade anterior: {remaining:.0f}s restantes ({remaining/60:.1f}min)")
+                        else:
+                            display.info(f"✅ Cooldown do trade anterior expirou")
+                            self.last_trade_time = None
+        except Exception as e:
+            display.warning(f"⚠️ Erro ao carregar estado: {e}")
+
+    def _save_state(self):
+        """Save bot state to file for persistence."""
+        try:
+            # Ensure storage directory exists
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+            state = {
+                'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
+                'updated_at': datetime.now().isoformat()
+            }
+
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            display.error(f"❌ Erro ao salvar estado: {e}")
+
+    def _detect_model_version(self) -> str:
+        """
+        Detect model version based on feature names (same as 2.py).
+
+        Returns:
+            str: Model version ("V1", "V2", "Classical", or "Unknown")
+        """
+        feature_names = self.feature_names
+
+        # Feature signatures for each version
+        classical_features = ['sma_7', 'sma_21', 'ema_7', 'ema_21']
+        v2_features = ['returns_kurt_50', 'returns_skew_50', 'rsi_5', 'roc_20', 'bb_width_50', 'price_position_10']
+        v1_features = ['momentum_3', 'momentum_5', 'volume_ratio_3', 'price_position']
+
+        has_classical = any(f in feature_names for f in classical_features)
+        has_v2 = any(f in feature_names for f in v2_features)
+        has_v1 = any(f in feature_names for f in v1_features)
+
+        if has_classical:
+            return "Classical"
+        elif has_v2:
+            return "V2"
+        elif has_v1:
+            return "V1"
+        else:
+            return "Unknown"
+
+    def get_current_data(self) -> pd.DataFrame:
+        """Download latest data and build features with timeout protection."""
+
+        # Download data (30 days lookback for indicators)
+        lookback_days = 30
+
+        try:
+            import signal
+            from contextlib import contextmanager
+
+            @contextmanager
+            def timeout_context(seconds):
+                """Context manager for timeout protection."""
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"Operation timed out after {seconds}s")
+
+                # Set alarm (only works on Unix)
+                if hasattr(signal, 'SIGALRM'):
+                    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(seconds)
+                    try:
+                        yield
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, old_handler)
+                else:
+                    # Windows doesn't support SIGALRM, skip timeout
+                    yield
+
+            # Protect data download with 120s timeout
+            display.info(f"📥 Baixando dados com timeout de 120s...")
+            with timeout_context(120):
+                # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
+                df = self.data_manager.get_data(
+                    self.symbol,
+                    f'{self.timeframe}m',
+                    lookback_days,
+                    False  # use_cache=False
+                )
+
+            if df.empty:
+                raise ValueError("No data received")
+
+            display.info(f"📥 Downloaded {len(df)} candles")
+
+            # Build features using FeatureStore
+            display.info(f"⚙️ Construindo features...")
+            df_features = self.feature_store.build_features(df, normalize=False)
+
+            # Add advanced features based on detected model version (same as 2.py)
+            if self.model_version == "V1":
+                display.info(f"   Applying V1 advanced features...")
+                df_features = create_advanced_features(df_features)
+            elif self.model_version == "V2":
+                display.info(f"   Applying V2 advanced features...")
+                df_features = create_advanced_features_v2(df_features)
+            elif self.model_version == "Classical":
+                display.info(f"   Applying Classical TA features...")
+                # Classical doesn't need extra features, FeatureStore is enough
+                pass
+            else:
+                display.warning(f"   ⚠️ Unknown model type - using V1 features as fallback")
+                df_features = create_advanced_features(df_features)
+
+            return df_features
+
+        except TimeoutError as e:
+            display.error(f"❌ Download TIMEOUT: {e}")
+            raise
+        except Exception as e:
+            display.error(f"❌ Error fetching data: {e}")
+            raise
+
+    def show_position_status(self, current_price: float):
+        """Display current position status with unrealized PnL."""
+        if not self.position:
+            return
+
+        entry_price = self.position['entry_price']
+        direction = self.position['direction']
+        sl = self.position['stop_loss']
+        tp = self.position['take_profit']
+
+        # Calculate unrealized PnL (gross)
+        if direction == 'long':
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - current_price) / entry_price) * 100
+
+        pnl_amount = self.position['size'] * (pnl_pct / 100)
+
+        # Calculate fees (0.055% taker x2 for entry+exit)
+        fee = self.position['size'] * 0.00055 * 2
+        pnl_amount_net = pnl_amount - fee
+        pnl_pct_net = (pnl_amount_net / self.position['size']) * 100
+
+        # Calculate distance to SL/TP
+        if direction == 'long':
+            dist_sl = ((current_price - sl) / sl) * 100
+            dist_tp = ((tp - current_price) / current_price) * 100
+        else:
+            dist_sl = ((sl - current_price) / current_price) * 100
+            dist_tp = ((current_price - tp) / tp) * 100
+
+        # Duration
+        duration = datetime.now() - self.position['entry_time']
+        hours = duration.total_seconds() / 3600
+        minutes = (duration.total_seconds() % 3600) / 60
+
+        # Format output
+        pnl_emoji = "🟢" if pnl_amount_net > 0 else "🔴" if pnl_amount_net < 0 else "⚪"
+        direction_emoji = "🟢" if direction == 'long' else "🔴"
+
+        display.info("")
+        display.info(f"{direction_emoji} {direction.upper()} | Entrada: ${entry_price:,.2f} | Atual: ${current_price:,.2f}")
+        display.info(f"{pnl_emoji} PnL Líquido: {pnl_pct_net:+.2f}% (${pnl_amount_net:+,.2f}) | Duração: {int(hours)}h {int(minutes)}m")
+        display.info(f"🛑 SL: ${sl:,.2f} ({dist_sl:+.2f}%) | 🎯 TP: ${tp:,.2f} ({dist_tp:+.2f}%)")
+
+    def check_position_exit(self, current_candle) -> bool:
+        """Check if current position should be exited."""
+        if not self.position:
+            return False
+
+        # Update last_price for tracking
+        self.last_price = current_candle['close']
+
+        # Show current position status
+        self.show_position_status(current_candle['close'])
+
+        # For REAL trading, check if Bybit closed the position
+        if not self.position.get('is_paper', True):
+            closed = self.check_position_closed()
+            if closed:
+                exit_price, reason = closed
+                self.close_position(current_candle, reason, close=exit_price)
+                return True
+            return False
+
+        # For PAPER mode, check locally
+        high = current_candle['high']
+        low = current_candle['low']
+        close = current_candle['close']
+        direction = self.position['direction']
+
+        # Check stop loss and take profit
+        if direction == 'long':
+            if low <= self.position['stop_loss']:
+                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                return True
+            if high >= self.position['take_profit']:
+                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                return True
+        else:  # short
+            if high >= self.position['stop_loss']:
+                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                return True
+            if low <= self.position['take_profit']:
+                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                return True
+
+        return False
+
+    def calculate_position_size(self, price: float, sl_price: float) -> float:
+        """
+        Calculate BTC quantity based on risk.
+
+        CRITICAL PROTECTION: Limits position to 95% of capital (same as backtest)
+        """
+        sl_dist = abs((sl_price - price) / price)
+        risk_amt = self.capital * self.risk_per_trade
+
+        # Calculate quantity based on risk
+        qty_btc = (risk_amt / sl_dist) / price if sl_dist > 0 else self.min_qty
+        qty_btc = max(self.min_qty, qty_btc)
+
+        # CRITICAL: Limit to 95% of capital (same as 1.py line 1082)
+        size_usd = qty_btc * price
+        max_size_usd = self.capital * 0.95
+        if size_usd > max_size_usd:
+            qty_btc = max_size_usd / price
+            qty_btc = max(self.min_qty, qty_btc)  # Ensure still above minimum
+
+        return qty_btc
+
+    def open_position(self, current_candle, signal, confidence):
+        """Open a new position with automatic SL/TP on Bybit."""
+
+        direction = 'long' if signal == 1 else 'short'
+        price = current_candle['close']
+        atr = current_candle.get('atr', price * 0.01)
+
+        # Calculate SL and TP (raw values)
+        if direction == 'long':
+            sl = price - (atr * self.sl_atr_mult)
+            tp = price + (atr * self.tp_atr_mult)
+            side = 'Buy'
+        else:
+            sl = price + (atr * self.sl_atr_mult)
+            tp = price - (atr * self.tp_atr_mult)
+            side = 'Sell'
+
+        # Calculate quantity in BTC
+        qty_btc = self.calculate_position_size(price, sl)
+
+        # Round prices and quantities using market meta
+        sl = round_price(sl, self.tick_size)
+        tp = round_price(tp, self.tick_size)
+        qty_btc = round_qty(qty_btc, self.qty_step, self.min_qty)
+        price = round_price(price, self.tick_size)
+        size_usd = qty_btc * price
+
+        # VALIDATIONS
+        if qty_btc < self.min_qty:
+            display.error(f"❌ Quantity {qty_btc} BTC below minimum {self.min_qty}!")
+            return
+
+        if size_usd < 10:
+            display.warning(f"⚠️ Size too small: ${size_usd:,.2f} < $10")
+            return
+
+        # Validate SL makes sense
+        if direction == 'long' and sl >= price:
+            display.error(f"❌ Invalid SL for LONG: ${sl:,.2f} >= ${price:,.2f}")
+            return
+        if direction == 'short' and sl <= price:
+            display.error(f"❌ Invalid SL for SHORT: ${sl:,.2f} <= ${price:,.2f}")
+            return
+
+        # Validate TP makes sense
+        if direction == 'long' and tp <= price:
+            display.error(f"❌ Invalid TP for LONG: ${tp:,.2f} <= ${price:,.2f}")
+            return
+        if direction == 'short' and tp >= price:
+            display.error(f"❌ Invalid TP for SHORT: ${tp:,.2f} >= ${price:,.2f}")
+            return
+
+        # Log position details
+        direction_emoji = "🟢" if direction == 'long' else "🔴"
+        display.info("")
+        display.info("=" * 80)
+        display.info(f"{direction_emoji} ABRINDO POSIÇÃO {direction.upper()}")
+        display.info("=" * 80)
+        display.info(f"Preço: ${price:,.2f}")
+        display.info(f"Confiança: {confidence:.1%}")
+        display.info(f"Qtd: {qty_btc} BTC = ${size_usd:,.2f}")
+        display.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
+        display.info(f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
+        display.info(f"ATR: ${atr:,.2f}")
+        display.info("=" * 80)
+
+        order_id = None
+        actual_entry_price = price
+        is_paper = self.dry_run
+
+        # Execute real order if not dry run
+        if not self.dry_run:
+            try:
+                display.info(f"💰 Sending REAL {side} order...")
+
+                # Place Market order
+                order = self.rest_client.place_order(
+                    symbol=self.symbol,
+                    side=side,
+                    order_type='Market',
+                    qty=qty_btc
+                )
+
+                display.info(f"📥 API Response: {order}")
+
+                if order and 'retCode' in order and order['retCode'] == 0:
+                    if 'result' in order and isinstance(order['result'], dict):
+                        result = order['result']
+
+                        if 'orderId' in result:
+                            order_id = result['orderId']
+                            display.info(f"✅ Order executed! ID: {order_id}")
+
+                            # Get actual fill price if available
+                            if 'price' in result and result['price']:
+                                try:
+                                    actual_entry_price = float(result['price'])
+                                except:
+                                    actual_entry_price = price
+
+                        # Configure SL/TP with retry
+                        display.info(f"📍 Setting SL/TP on Bybit...")
+                        display.info(f"   SL: ${sl:,.1f} | TP: ${tp:,.1f}")
+
+                        # Wait for position to be created (CRITICAL!)
+                        display.info("⏳ Waiting for position to be created...")
+                        time.sleep(3)
+
+                        # Verify position exists
+                        position_exists = False
+                        try:
+                            positions = self.rest_client.get_positions(symbol=self.symbol)
+                            positions_list = positions.get('result', {}).get('list', [])
+                            for pos in positions_list:
+                                if float(pos.get('size', 0)) > 0:
+                                    position_exists = True
+                                    display.info(f"✅ Position confirmed: {pos.get('size')} BTC")
+                                    break
+                        except Exception as e:
+                            display.warning(f"⚠️ Error verifying position: {e}")
+
+                        if not position_exists:
+                            display.error(f"❌ Position not created - cannot set SL/TP!")
+                        else:
+                            # Set SL/TP with retry
+                            def _set_sl_tp():
+                                sl_tp_result = self.rest_client.set_trading_stop(
+                                    category='linear',
+                                    symbol=self.symbol,
+                                    stopLoss=str(sl),
+                                    takeProfit=str(tp),
+                                    positionIdx=0
+                                )
+
+                                if sl_tp_result and 'retCode' in sl_tp_result and sl_tp_result['retCode'] == 0:
+                                    display.info(f"✅ SL/TP configured on Bybit!")
+                                    return True
+                                else:
+                                    error_msg = sl_tp_result.get('retMsg', 'Unknown') if sl_tp_result else 'No response'
+                                    raise Exception(f"API error: {error_msg}")
+
+                            result = retry_with_backoff(_set_sl_tp, max_retries=3, initial_delay=2.0)
+                            if not result:
+                                display.error(f"❌ Failed to set SL/TP after retries!")
+
+                else:
+                    raise Exception("API error - order failed")
+
+            except Exception as e:
+                display.error(f"❌ Order execution failed: {e}")
+                self.telegram.send(f"❌ <b>Order Failed</b>\n\n{e}")
+                return
+
+        # Save position
+        self.position = {
+            'symbol': self.symbol,
+            'direction': direction,
+            'entry_price': actual_entry_price,
+            'entry_time': datetime.now(),  # Store as datetime object, not string
+            'qty': qty_btc,
+            'size': size_usd,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'confidence': confidence,
+            'order_id': order_id,
+            'is_paper': is_paper,
+            'atr': atr
+        }
+
+        self.last_price = actual_entry_price
+
+        # Telegram notification
+        mode_str = "📝 PAPER" if is_paper else "💰 REAL"
+        self.telegram.send(
+            f"{direction_emoji} <b>ENTRADA {direction.upper()}</b> {mode_str}\n\n"
+            f"Preço: ${actual_entry_price:,.2f}\n"
+            f"Qtd: {qty_btc} BTC (${size_usd:,.2f})\n"
+            f"Confiança: {confidence:.1%}\n\n"
+            f"🛑 SL: ${sl:,.2f}\n"
+            f"🎯 TP: ${tp:,.2f}\n\n"
+            f"Order ID: {order_id if order_id else 'N/A'}"
+        )
+
+    def check_position_closed(self) -> Optional[tuple]:
+        """
+        Check if Bybit closed the position (SL/TP hit).
+        Only checks - does NOT close locally.
+        Returns: (exit_price, reason) if closed, None if still open
+        """
+        if not self.position or self.position.get('is_paper', True):
+            return None
+
+        try:
+            positions = self.rest_client.get_positions(symbol=self.position['symbol'])
+
+            if positions and 'retCode' in positions and positions['retCode'] == 0:
+                if 'result' in positions and 'list' in positions['result']:
+                    pos_list = positions['result']['list']
+
+                    for pos in pos_list:
+                        if pos['symbol'] == self.position['symbol']:
+                            size = float(pos.get('size', 0))
+
+                            # Position still open
+                            if size > 0:
+                                # Update last_price for tracking
+                                mark_price = float(pos.get('markPrice', 0))
+                                if mark_price > 0:
+                                    self.last_price = mark_price
+                                return None
+
+                            # Position closed
+                            else:
+                                display.info("✅ Posição fechada pela Bybit")
+
+                                # Use last_price as exit_price
+                                exit_price = self.last_price if self.last_price else self.position['entry_price']
+
+                                # Determine reason
+                                entry = self.position['entry_price']
+                                direction = self.position['direction']
+                                sl = self.position['stop_loss']
+                                tp = self.position['take_profit']
+
+                                tolerance = entry * 0.001
+
+                                if abs(exit_price - sl) <= tolerance:
+                                    reason = 'stop_loss'
+                                elif abs(exit_price - tp) <= tolerance:
+                                    reason = 'take_profit'
+                                else:
+                                    # Fallback logic
+                                    if direction == 'long':
+                                        reason = 'stop_loss' if exit_price < entry else 'take_profit'
+                                    else:
+                                        reason = 'stop_loss' if exit_price > entry else 'take_profit'
+
+                                display.info(f"✅ Saída: ${exit_price:,.2f} ({reason})")
+                                return (exit_price, reason)
+
+                    # Position not found = was closed
+                    display.info("✅ Position not found - was closed")
+                    exit_price = self.last_price if self.last_price else self.position['take_profit']
+                    return (exit_price, 'take_profit')
+
+        except Exception as e:
+            display.error(f"⚠️ Error checking position: {e}")
+            return None
+
+        return None
+
+    def close_position(self, current_candle, reason, close=None):
+        """Close current position."""
+        if not self.position:
+            return
+
+        exit_price = close if close else current_candle['close']
+        entry_price = self.position['entry_price']
+        direction = self.position['direction']
+
+        # Calculate PnL
+        if direction == 'long':
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+
+        pnl_amount = self.position['size'] * (pnl_pct / 100)
+
+        # Fees (0.055% taker)
+        fee = self.position['size'] * 0.00055 * 2  # entry + exit
+        pnl_amount_after_fees = pnl_amount - fee
+        pnl_pct_after_fees = (pnl_amount_after_fees / self.position['size']) * 100
+
+        # Duration
+        duration = current_candle.name - self.position['entry_time']
+
+        # Log
+        is_win = pnl_amount_after_fees > 0
+        result_emoji = "✅" if is_win else "❌"
+        reason_emoji = "🎯" if reason == 'take_profit' else "🛑"
+        reason_text = "GAIN/TAKE PROFIT" if reason == 'take_profit' else "STOP LOSS"
+
+        display.info("")
+        display.info("=" * 80)
+        display.info(f"{result_emoji} FECHANDO POSIÇÃO {direction.upper()} - {reason_emoji} {reason_text}")
+        display.info("=" * 80)
+        display.info(f"Entrada: ${entry_price:,.2f} @ {self.position['entry_time']}")
+        display.info(f"Saída:   ${exit_price:,.2f} @ {current_candle.name}")
+        display.info(f"Duração: {duration}")
+        display.info(f"PnL Líquido: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})")
+        display.info(f"Taxas: ${fee:.2f}")
+        display.info("=" * 80)
+
+        # Telegram notification
+        self.telegram.send(
+            f"{result_emoji} <b>SAÍDA {direction.upper()}</b> - {reason_emoji} {reason_text}\n\n"
+            f"Entrada: ${entry_price:,.2f}\n"
+            f"Saída: ${exit_price:,.2f}\n"
+            f"Duração: {duration}\n\n"
+            f"<b>PnL Líquido: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})</b>\n"
+            f"Taxas: ${fee:.2f}"
+        )
+
+        # TODO: Execute actual close if not dry_run
+        if not self.dry_run:
+            # self.close_order(self.position['direction'])
+            pass
+
+        # Clear position
+        self.position = None
+        self.last_trade_time = datetime.now()
+
+        # Save state to persist cooldown across restarts
+        self._save_state()
+
+    def recover_open_positions(self):
+        """
+        Recover any open positions from Bybit when bot starts.
+        This allows bot to resume monitoring existing positions.
+        """
+        if self.dry_run:
+            display.info("📋 Paper trading mode - no positions to recover")
+            return
+
+        try:
+            display.info("🔍 Checking for open positions on Bybit...")
+            positions = self.rest_client.get_positions(symbol=self.symbol)
+
+            if positions and 'retCode' in positions and positions['retCode'] == 0:
+                if 'result' in positions and 'list' in positions['result']:
+                    pos_list = positions['result']['list']
+
+                    for pos in pos_list:
+                        if pos['symbol'] == self.symbol:
+                            size = float(pos.get('size', 0))
+
+                            if size > 0:
+                                # Found open position!
+                                side = pos.get('side', '')
+                                entry_price = float(pos.get('avgPrice', 0))
+                                mark_price = float(pos.get('markPrice', 0))
+                                sl = float(pos.get('stopLoss', 0)) if pos.get('stopLoss') else None
+                                tp = float(pos.get('takeProfit', 0)) if pos.get('takeProfit') else None
+
+                                direction = 'long' if side == 'Buy' else 'short'
+
+                                display.info("")
+                                display.info("=" * 80)
+                                display.info("🔄 POSIÇÃO RECUPERADA DA BYBIT")
+                                display.info("=" * 80)
+                                display.info(f"Direção: {direction.upper()}")
+                                display.info(f"Tamanho: {size} BTC")
+                                display.info(f"Entrada: ${entry_price:,.2f}")
+                                display.info(f"Preço Atual: ${mark_price:,.2f}")
+                                if sl:
+                                    display.info(f"SL: ${sl:,.2f}")
+                                if tp:
+                                    display.info(f"TP: ${tp:,.2f}")
+                                display.info("=" * 80)
+
+                                # Recreate position state
+                                self.position = {
+                                    'symbol': self.symbol,
+                                    'direction': direction,
+                                    'entry_price': entry_price,
+                                    'entry_time': datetime.now(),  # Unknown actual entry time
+                                    'qty': size,
+                                    'size': size * entry_price,
+                                    'stop_loss': sl,
+                                    'take_profit': tp,
+                                    'confidence': 0.0,  # Unknown
+                                    'order_id': None,
+                                    'is_paper': False,
+                                    'atr': 0
+                                }
+
+                                self.last_price = mark_price
+
+                                # Telegram notification
+                                direction_emoji = "🟢" if direction == 'long' else "🔴"
+                                self.telegram.send(
+                                    f"{direction_emoji} <b>POSIÇÃO RECUPERADA</b>\n\n"
+                                    f"Direção: {direction.upper()}\n"
+                                    f"Tamanho: {size} BTC\n"
+                                    f"Entrada: ${entry_price:,.2f}\n"
+                                    f"Atual: ${mark_price:,.2f}\n\n"
+                                    f"Bot vai monitorar esta posição"
+                                )
+
+                                return
+
+                    display.info("✅ No open positions found")
+            else:
+                display.warning(f"⚠️ API error checking positions: {positions}")
+
+        except Exception as e:
+            display.error(f"❌ Error recovering positions: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def calculate_seconds_until_candle_close(self, timeframe_minutes: int) -> int:
+        """
+        Calculate seconds until next candle closes.
+
+        Args:
+            timeframe_minutes: Candle timeframe in minutes (e.g., 15)
+
+        Returns:
+            Seconds until next candle close
+        """
+        from datetime import timezone
+
+        now_utc = datetime.now(timezone.utc)
+        current_minute = now_utc.minute
+        current_second = now_utc.second
+
+        # Calculate how many minutes into the current candle period we are
+        minutes_into_candle = current_minute % timeframe_minutes
+
+        # Calculate minutes until candle closes
+        minutes_until_close = timeframe_minutes - minutes_into_candle
+
+        # If we're at exactly 0 seconds, the candle just closed
+        if minutes_until_close == timeframe_minutes and current_second == 0:
+            minutes_until_close = 0
+
+        # Calculate total seconds
+        seconds_until_close = (minutes_until_close * 60) - current_second
+
+        # Ensure positive
+        if seconds_until_close < 0:
+            seconds_until_close += timeframe_minutes * 60
+
+        return seconds_until_close
+
+    def run(self):
+        """Main trading loop - SIMPLIFIED to match btc_real_v5.py proven logic."""
+
+        display.info("🚀 Starting trading loop...")
+        display.info("Press Ctrl+C to stop")
+        display.info("")
+
+        # 🔍 DIAGNOSTIC: Check for missing features BEFORE starting loop
+        display.info("🔍 Checking feature compatibility...")
+        try:
+            # Get sample data to check features
+            df_test = self.get_current_data()
+            if df_test is not None and not df_test.empty:
+                df_features = set(df_test.columns)
+                model_features = set(self.feature_names)
+                missing = model_features - df_features
+                extra = df_features - model_features
+
+                display.info(f"   📊 Model expects: {len(model_features)} features")
+                display.info(f"   📊 Bot generates: {len(df_features)} features")
+
+                if missing:
+                    display.warning(f"\n⚠️ MISSING {len(missing)} FEATURES:")
+                    for feat in sorted(missing):
+                        display.warning(f"   ❌ {feat}")
+                    display.warning("\n⚠️ These will be filled with 0 (may affect predictions!)\n")
+                else:
+                    display.info("   ✅ All features present!")
+
+                if extra:
+                    display.info(f"   ℹ️ {len(extra)} extra features (unused by model)")
+        except Exception as e:
+            display.warning(f"   ⚠️ Could not check features: {e}")
+
+        display.info("")
+
+        # Try to recover any open positions from Bybit
+        self.recover_open_positions()
+
+        # Watchdog: track last activity to detect if bot is stuck
+        last_heartbeat = datetime.now()
+        heartbeat_interval = 300  # 5 minutes
+        loop_counter = 0
+
+        # Circuit breaker: track consecutive errors
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+
+        # Simple check interval (like btc_real_v5.py)
+        check_interval = 30  # 30 seconds
+
+        try:
+            while True:
+                try:
+                    loop_counter += 1
+
+                    # Heartbeat check - log every 5 minutes to prove we're alive
+                    now = datetime.now()
+                    if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
+                        from datetime import timezone
+                        now_utc = datetime.now(timezone.utc)
+                        display.info(f"💓 Heartbeat #{loop_counter} | UTC: {now_utc.strftime('%H:%M:%S')} | Status: {'Position open' if self.position else 'No position'}")
+                        last_heartbeat = now
+
+                        # Send heartbeat via Telegram every hour
+                        if loop_counter % 12 == 0:  # ~every hour with 5min heartbeats
+                            self.telegram.send(f"💓 <b>Bot Alive</b>\n\nLoop #{loop_counter}\nStatus: {'Position open' if self.position else 'No position'}")
+
+                    # Check for Telegram commands
+                    self.telegram.check_commands()
+
+                    # ===================================================================
+                    # SIMPLIFIED LOGIC (matching btc_real_v5.py):
+                    # 1. Download data EVERY iteration
+                    # 2. Get closed candle (iloc[-2])
+                    # 3. Check if already analyzed → skip if yes
+                    # 4. Check cooldown → skip if yes
+                    # 5. Make prediction
+                    # 6. Mark as analyzed
+                    # 7. Sleep 30s
+                    # 8. Repeat
+                    # ===================================================================
+
+                    # Step 1: Download data EVERY iteration (simple, reliable)
+                    df = self.get_current_data()
+
+                    if df is None or df.empty:
+                        display.warning("⚠️ No data received")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Step 2: Get CLOSED candle (iloc[-2]) not incomplete candle (iloc[-1])
+                    current = df.iloc[-2]
+                    current_candle_time = current.name
+                    price = current['close']
+
+                    # Step 3: Skip if already analyzed this candle
+                    if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
+                        display.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Step 3.5: First run - just mark current candle, don't predict yet
+                    if self.last_analyzed_candle_time is None:
+                        display.info(f"🚀 Primeira inicialização - marcando candle atual: {current_candle_time}")
+                        display.info(f"⏳ Aguardando próximo candle fechar (~15min) para fazer primeira predição...")
+                        self.last_analyzed_candle_time = current_candle_time
+                        time.sleep(check_interval)
+                        continue
+
+                    # Step 3.6: NEW CANDLE detected! Wait for API consolidation
+                    # When candle closes (e.g., 10:15), API needs ~5-15s to consolidate data
+                    # This ensures we get EXACT same data as backtest (complete candle)
+                    display.info(f"🆕 Novo candle detectado: {current_candle_time}")
+                    display.info(f"⏳ Aguardando 60s para API consolidar dados...")
+                    time.sleep(60)
+
+                    # Re-download data to get fully consolidated candle
+                    display.info(f"📥 Re-baixando dados para garantir candle consolidado...")
+                    df = self.get_current_data()
+
+                    if df is None or df.empty:
+                        display.warning("⚠️ No data received on re-fetch")
+                        time.sleep(check_interval)
+                        continue
+
+                    # Get the SAME candle again (now fully consolidated)
+                    current = df.iloc[-2]
+                    new_candle_time = current.name
+
+                    # Verify we got the same candle (sanity check)
+                    if new_candle_time != current_candle_time:
+                        display.warning(f"⚠️ Candle mudou após re-fetch: {current_candle_time} → {new_candle_time}")
+                        # Use the new one
+                        current_candle_time = new_candle_time
+
+                    price = current['close']
+
+                    # Show current price
+                    display.info(f"📊 Price: ${price:,.2f} | Candle: {current_candle_time}")
+
+                    # Check if we have an open position
+                    if self.position:
+                        # Check exit conditions
+                        self.check_position_exit(current)
+
+                        # If still have position, wait before next check
+                        if self.position:
+                            entry = self.position['entry_price']
+                            direction = self.position['direction']
+
+                            if direction == 'long':
+                                pnl_pct = ((price - entry) / entry) * 100
+                            else:
+                                pnl_pct = ((entry - price) / entry) * 100
+
+                            display.info(f"🟢 {direction.upper()} @ ${entry:,.2f} | PnL: {pnl_pct:+.2f}%")
+
+                    # Check if we can open a new position
+                    else:
+                        # Check if bot is paused
+                        if self.paused:
+                            display.info("⏸️ Bot pausado - aguardando /resume")
+                            time.sleep(60)
+                            continue
+
+                        # Step 4: Check cooldown
+                        if self.last_trade_time:
+                            time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
+                            if time_since_last_trade < self.trade_cooldown:
+                                remaining_min = int((self.trade_cooldown - time_since_last_trade) / 60)
+                                display.info(f"⏳ Cooldown: {remaining_min}min restantes")
+                                # Mark this candle as analyzed even during cooldown
+                                self.last_analyzed_candle_time = current_candle_time
+                                time.sleep(check_interval)
+                                continue
+
+                        # Step 5: Make prediction
+                        try:
+                            display.info("")
+                            display.info("=" * 80)
+                            display.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
+                            display.info(f"💰 Preço Close: ${current['close']:,.2f}")
+                            display.info(f"📊 ATR: ${current.get('atr', 0):,.2f}")
+                            display.info("=" * 80)
+
+                            # Get prediction for ONLY the last closed candle (iloc[-2])
+                            df_single = df.iloc[[-2]].copy()
+
+                            predictions = make_prediction(
+                                self.model,
+                                self.model_data,
+                                df_single,
+                                self.feature_names
+                            )
+
+                            # Get prediction
+                            pred = predictions[0]  # Only one prediction
+
+                            # Calculate confidence (same as btc_real_v5.py and 2.py)
+                            ml_confidence = abs(pred - self.optimal_threshold) * 2
+
+                            # Determine signal (same as btc_real_v5.py and 2.py)
+                            signal = 0  # Start as NEUTRO
+                            if pred > self.optimal_threshold and ml_confidence >= self.min_confidence:
+                                signal = 1  # long
+                            elif pred < self.optimal_threshold and ml_confidence >= self.min_confidence:
+                                signal = -1  # short
+
+                            sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
+                            passes = ml_confidence >= self.min_confidence
+                            status = '✅ PASS' if passes else '❌ FILTERED'
+
+                            # SEMPRE mostrar detalhes da predição
+                            display.info("")
+                            display.info("=" * 80)
+                            display.info(f"🔮 PREDIÇÃO GERADA")
+                            display.info("=" * 80)
+                            display.info(f"📊 Probabilidade: {pred:.4f}")
+                            display.info(f"🎯 Threshold: {self.optimal_threshold:.4f}")
+                            display.info(f"📈 Confiança: {ml_confidence:.2%}")
+                            display.info(f"🎲 Sinal: {sig_name} | {status}")
+                            display.info(f"⚙️ Min Confiança: {self.min_confidence:.2%}")
+                            display.info("=" * 80)
+                            display.info("")
+
+                            # Step 6: Mark this candle as analyzed (regardless of whether we trade)
+                            self.last_analyzed_candle_time = current_candle_time
+
+                            # Check if we have a valid signal (not NEUTRO)
+                            if signal != 0 and passes:
+                                display.info("="*80)
+                                display.info(f"🚨 OPENING {sig_name} POSITION")
+                                display.info("="*80)
+                                self.open_position(current, signal, ml_confidence)
+                            else:
+                                # Explicar POR QUE foi neutro/filtered
+                                if not passes:
+                                    display.info(f"⏭️ FILTERED: Confiança {ml_confidence:.2%} < {self.min_confidence:.2%} (mínimo)")
+                                else:
+                                    display.info(f"⏭️ NEUTRO: Probabilidade {pred:.4f} próxima do threshold {self.optimal_threshold:.4f}")
+
+                        except Exception as e:
+                            display.error(f"❌ Prediction error: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Step 7: Sleep check_interval (30s) before next iteration
+                    time.sleep(check_interval)
+
+                    # Reset consecutive errors on successful iteration
+                    if consecutive_errors > 0:
+                        display.info(f"✅ Recovered from errors (was {consecutive_errors} consecutive)")
+                        consecutive_errors = 0
+
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    consecutive_errors += 1
+                    last_error_time = datetime.now()
+
+                    display.error(f"❌ Error in main loop (#{consecutive_errors}): {e}")
+                    import traceback
+                    traceback.print_exc()
+
+                    # Circuit breaker: if too many consecutive errors, increase wait time and alert
+                    if consecutive_errors >= max_consecutive_errors:
+                        error_msg = f"🚨 CIRCUIT BREAKER: {consecutive_errors} consecutive errors! Última: {e}"
+                        display.error(error_msg)
+                        self.telegram.send(f"🚨 <b>ALERTA: Bot com problemas</b>\n\n{consecutive_errors} erros consecutivos\n\nÚltimo erro:\n{str(e)[:200]}")
+
+                        # Long wait (5 minutes) to avoid hammering if there's a persistent issue
+                        wait_seconds = 300
+                        display.error(f"⏳ Waiting {wait_seconds}s before retry...")
+                        time.sleep(wait_seconds)
+                    else:
+                        # Exponential backoff: 30s, 60s, 90s, 120s, 150s
+                        wait_seconds = min(30 * consecutive_errors, 150)
+                        display.warning(f"⏳ Waiting {wait_seconds}s before retry...")
+                        time.sleep(wait_seconds)
+
+        except KeyboardInterrupt:
+            display.info("")
+            display.info("🛑 Parando bot...")
+
+            # Don't close position - let it continue on Bybit
+            if self.position:
+                display.info("⚠️ Posição deixada aberta na Bybit (será recuperada no restart)")
+                display.info(f"   {self.position['direction'].upper()} @ ${self.position['entry_price']:,.2f}")
+
+            self.telegram.send("🛑 <b>Bot Parado</b>\n\n⚠️ Posição deixada aberta (se houver)")
+            display.info("✅ Bot parado com sucesso")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    bot = LiveTradingBot()
+    bot.run()
+
+
+if __name__ == '__main__':
+    main()
