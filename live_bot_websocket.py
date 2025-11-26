@@ -1324,14 +1324,24 @@ class LiveTradingBot:
         self.timeframe = os.getenv('TIMEFRAME', '15')
         self.model_path = os.getenv('MODEL_PATH', 'ml_model_master_scalper_365d.pkl')  # Modelo otimizado (2788% ROI em 365 dias)
 
-        # Trading parameters - Sistema de Duas Confianças
-        # Confiança BAIXA (25%) - risco menor
+        # Trading parameters - Sistema de TRÊS Confianças
+        # Confiança BAIXA (25%) - SL 1.5x, TP 1.0x, Risco 0.5%
         self.min_confidence_low = float(os.getenv('MIN_ML_CONFIDENCE_LOW', '0.25'))
         self.risk_low = float(os.getenv('RISK_LOW_PCT', '0.50')) / 100
+        self.sl_low = float(os.getenv('SL_LOW_MULT', '1.5'))
+        self.tp_low = float(os.getenv('TP_LOW_MULT', '1.0'))
 
-        # Confiança ALTA (40%) - risco maior
+        # Confiança ALTA (40%) - SL 1.5x, TP 1.0x, Risco 0.75%
         self.min_confidence_high = float(os.getenv('MIN_ML_CONFIDENCE_HIGH', '0.40'))
         self.risk_high = float(os.getenv('RISK_HIGH_PCT', '0.75')) / 100
+        self.sl_high = float(os.getenv('SL_HIGH_MULT', '1.5'))
+        self.tp_high = float(os.getenv('TP_HIGH_MULT', '1.0'))
+
+        # Confiança ULTRA (60%) - SL 2.0x, TP 0.7x, Risco 1.0%
+        self.min_confidence_ultra = float(os.getenv('MIN_ML_CONFIDENCE_ULTRA', '0.60'))
+        self.risk_ultra = float(os.getenv('RISK_ULTRA_PCT', '1.0')) / 100
+        self.sl_ultra = float(os.getenv('SL_ULTRA_MULT', '2.0'))
+        self.tp_ultra = float(os.getenv('TP_ULTRA_MULT', '0.7'))
 
         # Compatibilidade com código antigo (usa valores da LOW)
         self.min_confidence = self.min_confidence_low
@@ -1339,9 +1349,9 @@ class LiveTradingBot:
 
         self.initial_capital = float(os.getenv('INITIAL_CAPITAL', '125.0'))
 
-        # Stop loss / Take profit multipliers
+        # Stop loss / Take profit multipliers (fallback - agora cada nível tem seus próprios)
         self.sl_atr_mult = float(os.getenv('SL_ATR_MULT', '2.0'))
-        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))  # Otimizado: 100% WR nos testes!
+        self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))
 
         # Cooldown between trades (seconds)
         self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
@@ -1701,7 +1711,7 @@ class LiveTradingBot:
 
         return qty_btc
 
-    def open_position(self, current_candle, signal, confidence, risk_used: float = None, conf_level: str = "STANDARD"):
+    def open_position(self, current_candle, signal, confidence, risk_used: float = None, conf_level: str = "STANDARD", sl_mult: float = None, tp_mult: float = None):
         """Open a new position with automatic SL/TP on Bybit.
 
         Args:
@@ -1709,21 +1719,27 @@ class LiveTradingBot:
             signal: Trade signal (1=long, -1=short)
             confidence: ML confidence level
             risk_used: Risk percentage to use (optional)
-            conf_level: Confidence level name for logging (LOW/HIGH/STANDARD)
+            conf_level: Confidence level name for logging (LOW/HIGH/ULTRA/STANDARD)
+            sl_mult: Stop loss ATR multiplier (optional, uses default if not provided)
+            tp_mult: Take profit ATR multiplier (optional, uses default if not provided)
         """
 
         direction = 'long' if signal == 1 else 'short'
         price = current_candle['close']
         atr = current_candle.get('atr', price * 0.01)
 
+        # Use custom multipliers or fallback to defaults
+        sl_multiplier = sl_mult if sl_mult is not None else self.sl_atr_mult
+        tp_multiplier = tp_mult if tp_mult is not None else self.tp_atr_mult
+
         # Calculate SL and TP (raw values)
         if direction == 'long':
-            sl = price - (atr * self.sl_atr_mult)
-            tp = price + (atr * self.tp_atr_mult)
+            sl = price - (atr * sl_multiplier)
+            tp = price + (atr * tp_multiplier)
             side = 'Buy'
         else:
-            sl = price + (atr * self.sl_atr_mult)
-            tp = price - (atr * self.tp_atr_mult)
+            sl = price + (atr * sl_multiplier)
+            tp = price - (atr * tp_multiplier)
             side = 'Sell'
 
         # Calculate quantity in BTC with custom risk
@@ -1763,7 +1779,7 @@ class LiveTradingBot:
 
         # Log position details
         direction_emoji = "🟢" if direction == 'long' else "🔴"
-        conf_emoji = "🟡" if conf_level == "LOW" else "🟢" if conf_level == "HIGH" else "⚪"
+        conf_emoji = "🟡" if conf_level == "LOW" else "🟢" if conf_level == "HIGH" else "🔥" if conf_level == "ULTRA" else "⚪"
         risk_pct = (risk_used if risk_used else self.risk_per_trade) * 100
 
         display.info("")
@@ -1774,8 +1790,8 @@ class LiveTradingBot:
         display.info(f"Confiança: {confidence:.1%} | Nível: {conf_emoji} {conf_level}")
         display.info(f"Risco: {risk_pct:.2f}% do capital")
         display.info(f"Qtd: {qty_btc} BTC = ${size_usd:,.2f}")
-        display.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%)")
-        display.info(f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%)")
+        display.info(f"🛑 SL: ${sl:,.2f} ({-abs((sl-price)/price)*100:.1f}%) [ATR×{sl_multiplier}]")
+        display.info(f"🎯 TP: ${tp:,.2f} ({abs((tp-price)/price)*100:.1f}%) [ATR×{tp_multiplier}]")
         display.info(f"ATR: ${atr:,.2f}")
         display.info("=" * 80)
 
@@ -2350,31 +2366,53 @@ class LiveTradingBot:
                             # Calculate confidence (same as btc_real_v5.py and 2.py)
                             ml_confidence = abs(pred - self.optimal_threshold) * 2
 
-                            # 🎯 Sistema de DUAS Confianças - verifica HIGH primeiro, depois LOW
+                            # 🎯 Sistema de TRÊS Confianças - verifica ULTRA primeiro, depois HIGH, depois LOW
                             signal = 0  # Start as NEUTRO
                             risk_to_use = None
+                            sl_to_use = None
+                            tp_to_use = None
                             conf_level = "NONE"
 
                             # Verificar se passa LONG ou SHORT
                             if pred > self.optimal_threshold:
-                                # LONG signal
-                                if ml_confidence >= self.min_confidence_high:
+                                # LONG signal - check ULTRA > HIGH > LOW
+                                if ml_confidence >= self.min_confidence_ultra:
+                                    signal = 1
+                                    risk_to_use = self.risk_ultra
+                                    sl_to_use = self.sl_ultra
+                                    tp_to_use = self.tp_ultra
+                                    conf_level = "ULTRA"
+                                elif ml_confidence >= self.min_confidence_high:
                                     signal = 1
                                     risk_to_use = self.risk_high
+                                    sl_to_use = self.sl_high
+                                    tp_to_use = self.tp_high
                                     conf_level = "HIGH"
                                 elif ml_confidence >= self.min_confidence_low:
                                     signal = 1
                                     risk_to_use = self.risk_low
+                                    sl_to_use = self.sl_low
+                                    tp_to_use = self.tp_low
                                     conf_level = "LOW"
                             elif pred < self.optimal_threshold:
-                                # SHORT signal
-                                if ml_confidence >= self.min_confidence_high:
+                                # SHORT signal - check ULTRA > HIGH > LOW
+                                if ml_confidence >= self.min_confidence_ultra:
+                                    signal = -1
+                                    risk_to_use = self.risk_ultra
+                                    sl_to_use = self.sl_ultra
+                                    tp_to_use = self.tp_ultra
+                                    conf_level = "ULTRA"
+                                elif ml_confidence >= self.min_confidence_high:
                                     signal = -1
                                     risk_to_use = self.risk_high
+                                    sl_to_use = self.sl_high
+                                    tp_to_use = self.tp_high
                                     conf_level = "HIGH"
                                 elif ml_confidence >= self.min_confidence_low:
                                     signal = -1
                                     risk_to_use = self.risk_low
+                                    sl_to_use = self.sl_low
+                                    tp_to_use = self.tp_low
                                     conf_level = "LOW"
 
                             sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
@@ -2391,12 +2429,13 @@ class LiveTradingBot:
                             display.info(f"📈 Confiança ML: {ml_confidence:.2%}")
                             display.info(f"🎲 Sinal: {sig_name} | {status}")
                             display.info("")
-                            display.info(f"⚙️ Limites de Confiança:")
-                            display.info(f"   🟢 HIGH ({self.min_confidence_high:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_high else '❌ Não atingiu'}")
-                            display.info(f"   🟡 LOW  ({self.min_confidence_low:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_low else '❌ Não atingiu'}")
+                            display.info(f"⚙️ Limites de Confiança (Sistema de TRÊS Níveis):")
+                            display.info(f"   🔥 ULTRA ({self.min_confidence_ultra:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_ultra else '❌ Não atingiu'} [SL={self.sl_ultra}x TP={self.tp_ultra}x R={self.risk_ultra*100:.2f}%]")
+                            display.info(f"   🟢 HIGH  ({self.min_confidence_high:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_high else '❌ Não atingiu'} [SL={self.sl_high}x TP={self.tp_high}x R={self.risk_high*100:.2f}%]")
+                            display.info(f"   🟡 LOW   ({self.min_confidence_low:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_low else '❌ Não atingiu'} [SL={self.sl_low}x TP={self.tp_low}x R={self.risk_low*100:.2f}%]")
                             if passes:
                                 risk_display = (risk_to_use * 100) if risk_to_use else 0
-                                display.info(f"   💰 Risco a usar: {risk_display:.2f}%")
+                                display.info(f"   💰 Usando nível: {conf_level} | Risco: {risk_display:.2f}% | SL: {sl_to_use}x | TP: {tp_to_use}x")
                             display.info("=" * 80)
                             display.info("")
 
@@ -2408,7 +2447,7 @@ class LiveTradingBot:
                                 display.info("="*80)
                                 display.info(f"🚨 OPENING {sig_name} POSITION (Nível: {conf_level})")
                                 display.info("="*80)
-                                self.open_position(current, signal, ml_confidence, risk_used=risk_to_use, conf_level=conf_level)
+                                self.open_position(current, signal, ml_confidence, risk_used=risk_to_use, conf_level=conf_level, sl_mult=sl_to_use, tp_mult=tp_to_use)
                             else:
                                 # Explicar POR QUE foi neutro/filtered
                                 if not passes:
