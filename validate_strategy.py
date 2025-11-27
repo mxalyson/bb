@@ -28,34 +28,32 @@ logger = None
 
 def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add MASTER TRADER advanced features - SAME as training!"""
-    
+
     df_features = df.copy()
-    
+
     # Multi-period momentum
     for period in [3, 5, 8, 13, 21]:
         df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
         df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
-    
-    # Trend strength
-    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
-        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
-    
-    # Volatility regimes
-    if 'atr' in df_features.columns:
-        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
-    
-    # Price position in recent range
+
+    # Trend strength (NO IF - ema50/ema200 always exist)
+    df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regime (NO IF - atr always exists)
+    df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position (NO .fillna - matches train_master_scalper.py)
     df_features['price_position'] = (
-        (df_features['close'] - df_features['low'].rolling(20).min()) / 
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
         (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
-    ).fillna(0.5)
-    
+    )
+
     # Volume momentum
     df_features['volume_momentum'] = df_features['volume'].pct_change(5)
-    
+
     # Acceleration
     df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
-    
+
     return df_features
 
 
