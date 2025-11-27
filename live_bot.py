@@ -726,11 +726,13 @@ class LiveTradingBot:
             self.min_qty = 0.001
 
         # State
-        self.position: Optional[Dict] = None
+        self.positions: List[Dict] = []  # NOVO: Lista de posições (permite múltiplas)
+        self.position: Optional[Dict] = None  # Mantido para compatibilidade
         self.last_trade_time: Optional[datetime] = None
         self.capital = self.initial_capital
         self.last_price: Optional[float] = None
         self.last_analyzed_candle_time: Optional[datetime] = None  # Track last candle to avoid re-analysis
+        self.max_positions = int(os.getenv('MAX_POSITIONS', '3'))  # Máximo de posições simultâneas
 
         # State persistence file (unique per symbol)
         symbol_clean = self.symbol.replace('USDT', '').lower()
@@ -842,94 +844,108 @@ class LiveTradingBot:
             logger.error(f"❌ Error fetching data: {e}")
             raise
 
-    def show_position_status(self, current_price: float):
-        """Display current position status with unrealized PnL."""
-        if not self.position:
+    def show_positions_status(self, current_price: float):
+        """Display all positions status with unrealized PnL."""
+        if not self.positions:
             return
 
-        entry_price = self.position['entry_price']
-        direction = self.position['direction']
-        sl = self.position['stop_loss']
-        tp = self.position['take_profit']
-
-        # Calculate unrealized PnL (gross)
-        if direction == 'long':
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        else:
-            pnl_pct = ((entry_price - current_price) / entry_price) * 100
-
-        pnl_amount = self.position['size'] * (pnl_pct / 100)
-
-        # Calculate fees (0.055% taker x2 for entry+exit)
-        fee = self.position['size'] * 0.00055 * 2
-        pnl_amount_net = pnl_amount - fee
-        pnl_pct_net = (pnl_amount_net / self.position['size']) * 100
-
-        # Calculate distance to SL/TP
-        if direction == 'long':
-            dist_sl = ((current_price - sl) / sl) * 100
-            dist_tp = ((tp - current_price) / current_price) * 100
-        else:
-            dist_sl = ((sl - current_price) / current_price) * 100
-            dist_tp = ((current_price - tp) / tp) * 100
-
-        # Duration
-        duration = datetime.now() - self.position['entry_time']
-        hours = duration.total_seconds() / 3600
-        minutes = (duration.total_seconds() % 3600) / 60
-
-        # Format output
-        pnl_emoji = "🟢" if pnl_amount_net > 0 else "🔴" if pnl_amount_net < 0 else "⚪"
-        direction_emoji = "🟢" if direction == 'long' else "🔴"
-
         logger.info("")
-        logger.info(f"{direction_emoji} {direction.upper()} | Entrada: ${entry_price:,.2f} | Atual: ${current_price:,.2f}")
-        logger.info(f"{pnl_emoji} PnL Líquido: {pnl_pct_net:+.2f}% (${pnl_amount_net:+,.2f}) | Duração: {int(hours)}h {int(minutes)}m")
-        logger.info(f"🛑 SL: ${sl:,.2f} ({dist_sl:+.2f}%) | 🎯 TP: ${tp:,.2f} ({dist_tp:+.2f}%)")
+        logger.info(f"📊 Posições Abertas: {len(self.positions)}")
+        logger.info("=" * 80)
 
-    def check_position_exit(self, current_candle) -> bool:
-        """Check if current position should be exited."""
-        if not self.position:
-            return False
+        total_pnl = 0
+
+        for idx, position in enumerate(self.positions, 1):
+            entry_price = position['entry_price']
+            direction = position['direction']
+            sl = position['stop_loss']
+            tp = position['take_profit']
+            confidence = position.get('confidence', 0)
+
+            # Calculate unrealized PnL (gross)
+            if direction == 'long':
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            else:
+                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+
+            pnl_amount = position['size'] * (pnl_pct / 100)
+
+            # Calculate fees (0.055% taker x2 for entry+exit)
+            fee = position['size'] * 0.00055 * 2
+            pnl_amount_net = pnl_amount - fee
+            pnl_pct_net = (pnl_amount_net / position['size']) * 100
+
+            total_pnl += pnl_amount_net
+
+            # Calculate distance to SL/TP
+            if direction == 'long':
+                dist_sl = ((current_price - sl) / sl) * 100
+                dist_tp = ((tp - current_price) / current_price) * 100
+            else:
+                dist_sl = ((sl - current_price) / current_price) * 100
+                dist_tp = ((current_price - tp) / tp) * 100
+
+            # Duration
+            duration = datetime.now() - position['entry_time']
+            hours = duration.total_seconds() / 3600
+            minutes = (duration.total_seconds() % 3600) / 60
+
+            # Format output
+            pnl_emoji = "🟢" if pnl_amount_net > 0 else "🔴" if pnl_amount_net < 0 else "⚪"
+            direction_emoji = "🟢" if direction == 'long' else "🔴"
+
+            logger.info(f"[{idx}] {direction_emoji} {direction.upper()} | Entrada: ${entry_price:,.2f} | Conf: {confidence:.0%}")
+            logger.info(f"    {pnl_emoji} PnL: {pnl_pct_net:+.2f}% (${pnl_amount_net:+,.2f}) | {int(hours)}h {int(minutes)}m")
+            logger.info(f"    🛑 SL: ${sl:,.2f} ({dist_sl:+.2f}%) | 🎯 TP: ${tp:,.2f} ({dist_tp:+.2f}%)")
+
+        logger.info("=" * 80)
+        logger.info(f"💰 PnL Total: ${total_pnl:+,.2f}")
+        logger.info("")
+
+    def check_positions_exit(self, current_candle):
+        """Check if any positions should be exited."""
+        if not self.positions:
+            return
 
         # Update last_price for tracking
         self.last_price = current_candle['close']
 
-        # Show current position status
-        self.show_position_status(current_candle['close'])
+        # Show current positions status
+        self.show_positions_status(current_candle['close'])
 
-        # For REAL trading, check if Bybit closed the position
-        if not self.position.get('is_paper', True):
-            closed = self.check_position_closed()
-            if closed:
-                exit_price, reason = closed
-                self.close_position(current_candle, reason, close=exit_price)
-                return True
-            return False
-
-        # For PAPER mode, check locally
         high = current_candle['high']
         low = current_candle['low']
-        close = current_candle['close']
-        direction = self.position['direction']
 
-        # Check stop loss and take profit
-        if direction == 'long':
-            if low <= self.position['stop_loss']:
-                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
-                return True
-            if high >= self.position['take_profit']:
-                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
-                return True
-        else:  # short
-            if high >= self.position['stop_loss']:
-                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
-                return True
-            if low <= self.position['take_profit']:
-                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
-                return True
+        # Check each position for exit
+        positions_to_close = []
 
-        return False
+        for position in self.positions:
+            # For REAL trading, check if Bybit closed the position
+            if not position.get('is_paper', True):
+                closed = self.check_position_closed_bybit(position)
+                if closed:
+                    exit_price, reason = closed
+                    positions_to_close.append((position, reason, exit_price))
+                    continue
+
+            # For PAPER mode, check locally
+            direction = position['direction']
+
+            # Check stop loss and take profit
+            if direction == 'long':
+                if low <= position['stop_loss']:
+                    positions_to_close.append((position, 'stop_loss', position['stop_loss']))
+                elif high >= position['take_profit']:
+                    positions_to_close.append((position, 'take_profit', position['take_profit']))
+            else:  # short
+                if high >= position['stop_loss']:
+                    positions_to_close.append((position, 'stop_loss', position['stop_loss']))
+                elif low <= position['take_profit']:
+                    positions_to_close.append((position, 'take_profit', position['take_profit']))
+
+        # Close positions that hit SL/TP
+        for position, reason, exit_price in positions_to_close:
+            self.close_position(current_candle, position, reason, close=exit_price)
 
     def calculate_position_size(self, price: float, sl_price: float) -> float:
         """
