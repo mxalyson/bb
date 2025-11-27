@@ -422,17 +422,24 @@ class BacktestEngine:
 
         print(f"✅ {len(self.trades)} trades")
 
-        # ✅ DEBUG: Show filter statistics
+        # ✅ DEBUG: Show filter statistics (v1.1)
+        total_analyzed = len(df) - 200  # Subtrai os primeiros 200 candles
+        print(f"\n📊 ESTATÍSTICAS DE FILTROS (Candles analisados: {total_analyzed}):")
+
         if hasattr(self, 'filter_stats'):
-            total_analyzed = len(df) - 200  # Subtrai os primeiros 200 candles
-            total_filtered = sum(self.filter_stats.values())
-            print(f"\n📊 ESTATÍSTICAS DE FILTROS:")
-            print(f"   Candles analisados: {total_analyzed}")
-            print(f"   🚫 Filtrados por confiança: {self.filter_stats['confidence']}")
-            print(f"   🚫 Filtrados por volatilidade: {self.filter_stats['volatility']}")
-            print(f"   🚫 Filtrados por tendência: {self.filter_stats['trend']}")
-            print(f"   ✅ Sinais válidos: {self.filter_stats['valid']}")
-            print(f"   📉 Taxa de aprovação: {self.filter_stats['valid']/total_analyzed*100:.1f}%")
+            print(f"   🚫 Filtrados por confiança: {self.filter_stats['confidence']} ({self.filter_stats['confidence']/total_analyzed*100:.1f}%)")
+            print(f"   🚫 Filtrados por volatilidade: {self.filter_stats['volatility']} ({self.filter_stats['volatility']/total_analyzed*100:.1f}%)")
+            print(f"   🚫 Filtrados por tendência: {self.filter_stats['trend']} ({self.filter_stats['trend']/total_analyzed*100:.1f}%)")
+            print(f"   ✅ Sinais válidos: {self.filter_stats['valid']} ({self.filter_stats['valid']/total_analyzed*100:.1f}%)")
+
+            # Calcular quantos sinais tiveram confiança mas não viraram trades
+            signals_with_conf = total_analyzed - self.filter_stats['confidence']
+            signals_passed_filters = self.filter_stats['valid']
+            if signals_passed_filters > 0 and len(self.trades) == 0:
+                print(f"\n   ⚠️ ATENÇÃO: {signals_passed_filters} sinais VÁLIDOS mas 0 TRADES!")
+                print(f"      Possível causa: Cooldown entre trades ou outra lógica bloqueando")
+        else:
+            print(f"   ⚠️ filter_stats não foi criado - possível erro no get_signal()")
 
     def get_stats(self) -> Dict:
         if not self.trades:
@@ -499,9 +506,21 @@ class BacktestEngine:
         }
 
 def main():
-    global logger
+    global logger, SYMBOL, LOOKBACK_DAYS
+
+    # ✅ Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Backtest trading strategy')
+    parser.add_argument('--symbol', type=str, default=SYMBOL, help='Trading symbol (e.g. BTCUSDT, ETHUSDT)')
+    parser.add_argument('--days', type=int, default=LOOKBACK_DAYS, help='Number of days to backtest')
+    args = parser.parse_args()
+
+    # Override defaults with command line args
+    SYMBOL = args.symbol
+    LOOKBACK_DAYS = args.days
 
     print("\n🔬 BACKTEST SEM FILTRO DE TENDÊNCIA + TRAILING STOP")
+    print(f"🔧 Versão: DEBUG v1.1 (Com estatísticas de filtros)")  # ✅ Identifica versão
     print(f"Símbolo: {SYMBOL}")
     print(f"Modelo: {MODEL_PATH}")
     print(f"Capital: ${INITIAL_CAPITAL}")
