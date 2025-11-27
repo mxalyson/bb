@@ -29,10 +29,9 @@ except:
     HAS_MODULES = False
 
 # Config
-SYMBOL = 'BTCUSDT'  # ✅ FIX: Match model symbol (was ETHUSDT with BTCUSDT model)
-# ⚠️ To use ETHUSDT, train a specific model: scalping_model_ETHUSDT_15m.pkl
-LOOKBACK_DAYS = 15  # Quantidade de dias históricos (ex: 30, 60, 90, 180, 365)
-MODEL_PATH = 'storage/models/scalping_model_BTCUSDT_15m.pkl'  # Caminho do modelo .pkl
+SYMBOL = 'BTCUSDT'
+LOOKBACK_DAYS = 90  # ✅ CORRIGIDO: Usar mesmo lookback do backtest_08.py que funciona
+MODEL_PATH = 'storage/models/ml_model_master_scalper_365d.pkl'  # ✅ CORRIGIDO: Usar mesmo modelo do 08.py
 
 INITIAL_CAPITAL = 300.0
 RISK_PER_TRADE = 0.02
@@ -527,21 +526,9 @@ class BacktestEngine:
         }
 
 def main():
-    global logger, SYMBOL, LOOKBACK_DAYS
-
-    # ✅ Parse command line arguments
-    import argparse
-    parser = argparse.ArgumentParser(description='Backtest trading strategy')
-    parser.add_argument('--symbol', type=str, default=SYMBOL, help='Trading symbol (e.g. BTCUSDT, ETHUSDT)')
-    parser.add_argument('--days', type=int, default=LOOKBACK_DAYS, help='Number of days to backtest')
-    args = parser.parse_args()
-
-    # Override defaults with command line args
-    SYMBOL = args.symbol
-    LOOKBACK_DAYS = args.days
+    global logger
 
     print("\n🔬 BACKTEST SEM FILTRO DE TENDÊNCIA + TRAILING STOP")
-    print(f"🔧 Versão: DEBUG v1.1 (Com estatísticas de filtros)")  # ✅ Identifica versão
     print(f"Símbolo: {SYMBOL}")
     print(f"Modelo: {MODEL_PATH}")
     print(f"Capital: ${INITIAL_CAPITAL}")
