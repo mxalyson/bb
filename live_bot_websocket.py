@@ -1349,6 +1349,46 @@ class LiveTradingBot:
 
         self.initial_capital = float(os.getenv('INITIAL_CAPITAL', '125.0'))
 
+        # ===================================================================
+        # LOGS INICIAIS - Sistema de Três Níveis de Confiança
+        # ===================================================================
+        display.info("=" * 80)
+        display.info("📝 Variáveis de Ambiente - Sistema de Três Níveis de Confiança")
+        display.info("=" * 80)
+        display.info("")
+        display.info("# LOW (25%)")
+        display.info(f"MIN_ML_CONFIDENCE_LOW={self.min_confidence_low:.2f}")
+        display.info(f"RISK_LOW_PCT={self.risk_low * 100:.2f}%")
+        display.info(f"SL_LOW_MULT={self.sl_low}x")
+        display.info(f"TP_LOW_MULT={self.tp_low}x")
+        display.info("")
+        display.info("# HIGH (40%)")
+        display.info(f"MIN_ML_CONFIDENCE_HIGH={self.min_confidence_high:.2f}")
+        display.info(f"RISK_HIGH_PCT={self.risk_high * 100:.2f}%")
+        display.info(f"SL_HIGH_MULT={self.sl_high}x")
+        display.info(f"TP_HIGH_MULT={self.tp_high}x")
+        display.info("")
+        display.info("# ULTRA (60%)")
+        display.info(f"MIN_ML_CONFIDENCE_ULTRA={self.min_confidence_ultra:.2f}")
+        display.info(f"RISK_ULTRA_PCT={self.risk_ultra * 100:.2f}%")
+        display.info(f"SL_ULTRA_MULT={self.sl_ultra}x")
+        display.info(f"TP_ULTRA_MULT={self.tp_ultra}x")
+        display.info("")
+        display.info("=" * 80)
+        display.info("🎯 Como Funciona:")
+        display.info("=" * 80)
+        display.info("O bot agora verifica a confiança da predição e:")
+        display.info(f"• Se >= {self.min_confidence_ultra:.0%}: usa nível ULTRA (SL {self.sl_ultra}x, TP {self.tp_ultra}x, Risco {self.risk_ultra*100:.2f}%)")
+        display.info(f"• Se >= {self.min_confidence_high:.0%}: usa nível HIGH (SL {self.sl_high}x, TP {self.tp_high}x, Risco {self.risk_high*100:.2f}%)")
+        display.info(f"• Se >= {self.min_confidence_low:.0%}: usa nível LOW (SL {self.sl_low}x, TP {self.tp_low}x, Risco {self.risk_low*100:.2f}%)")
+        display.info(f"• Se < {self.min_confidence_low:.0%}: FILTERED (não entra)")
+        display.info("")
+        display.info("Cada trade agora mostrará nos logs qual nível foi usado e")
+        display.info("exatamente quais parâmetros estão sendo aplicados!")
+        display.info("=" * 80)
+        display.info("")
+
+
         # Stop loss / Take profit multipliers (fallback - agora cada nível tem seus próprios)
         self.sl_atr_mult = float(os.getenv('SL_ATR_MULT', '2.0'))
         self.tp_atr_mult = float(os.getenv('TP_ATR_MULT', '0.7'))
@@ -1425,9 +1465,10 @@ class LiveTradingBot:
         display.info(f"Timeframe: {self.timeframe}m")
         display.info(f"Model: {Path(self.model_path).name}")
         display.info("")
-        display.info("⚙️ Sistema de Duas Confianças:")
-        display.info(f"   🟡 LOW:  {self.min_confidence_low*100:.0f}% confiança → Risco {self.risk_low*100:.2f}%")
-        display.info(f"   🟢 HIGH: {self.min_confidence_high*100:.0f}% confiança → Risco {self.risk_high*100:.2f}%")
+        display.info("⚙️ Sistema de Três Níveis de Confiança:")
+        display.info(f"   🟡 LOW:   {self.min_confidence_low*100:.0f}% confiança → Risco {self.risk_low*100:.2f}% | SL {self.sl_low}x | TP {self.tp_low}x")
+        display.info(f"   🟠 HIGH:  {self.min_confidence_high*100:.0f}% confiança → Risco {self.risk_high*100:.2f}% | SL {self.sl_high}x | TP {self.tp_high}x")
+        display.info(f"   🔴 ULTRA: {self.min_confidence_ultra*100:.0f}% confiança → Risco {self.risk_ultra*100:.2f}% | SL {self.sl_ultra}x | TP {self.tp_ultra}x")
         display.info("")
         display.info(f"SL: {self.sl_atr_mult}x ATR | TP: {self.tp_atr_mult}x ATR")
         display.info(f"Trade Cooldown: {self.trade_cooldown}s ({self.trade_cooldown/60:.1f}min)")
@@ -1646,7 +1687,7 @@ class LiveTradingBot:
         self.last_price = current_candle['close']
 
         # Show current position status
-        self.show_position_status(current_candle['close'])
+        # self.show_position_status(current_candle['close'])  # Removido - duplicado
 
         # For REAL trading, check if Bybit closed the position
         if not self.position.get('is_paper', True):
@@ -2164,357 +2205,244 @@ class LiveTradingBot:
 
         return seconds_until_close
 
-    def run(self):
-        """Main trading loop - SIMPLIFIED to match btc_real_v5.py proven logic."""
 
-        display.info("🚀 Starting trading loop...")
-        display.info("Press Ctrl+C to stop")
-        display.info("")
-
-        # 🔍 DIAGNOSTIC: Check for missing features BEFORE starting loop
-        display.info("🔍 Checking feature compatibility...")
+    def _check_feature_compatibility(self):
+        """Verifica compatibilidade de features (uma vez no inicio)."""
+        display.info("Checking feature compatibility...")
         try:
-            # Get sample data to check features
             df_test = self.get_current_data()
             if df_test is not None and not df_test.empty:
                 df_features = set(df_test.columns)
                 model_features = set(self.feature_names)
+
                 missing = model_features - df_features
                 extra = df_features - model_features
 
-                display.info(f"   📊 Model expects: {len(model_features)} features")
-                display.info(f"   📊 Bot generates: {len(df_features)} features")
+                display.info(f"  Model expects: {len(model_features)} features")
+                display.info(f"  Bot generates: {len(df_features)} features")
 
                 if missing:
-                    display.warning(f"\n⚠️ MISSING {len(missing)} FEATURES:")
+                    display.warning(f"  MISSING {len(missing)} features")
                     for feat in sorted(missing):
-                        display.warning(f"   ❌ {feat}")
-                    display.warning("\n⚠️ These will be filled with 0 (may affect predictions!)\n")
+                        display.warning(f"    - {feat}")
+                    display.warning("  These will be filled with 0 - may affect predictions!")
                 else:
-                    display.info("   ✅ All features present!")
+                    display.info("  All features present!")
 
                 if extra:
-                    display.info(f"   ℹ️ {len(extra)} extra features (unused by model)")
+                    display.info(f"  {len(extra)} extra features (unused by model)")
         except Exception as e:
-            display.warning(f"   ⚠️ Could not check features: {e}")
-
+            display.warning(f"  Could not check features: {e}")
         display.info("")
 
-        # Try to recover any open positions from Bybit
-        self.recover_open_positions()
+    def run(self):
+        """
+        LOOP SIMPLIFICADO - Igual no_sleep
 
-        # Watchdog: track last activity to detect if bot is stuck
+        - Checa a cada 30s
+        - Entra em qualquer momento (nao espera candle fechar)
+        - Usa iloc[-1] (ultimo candle, mesmo se aberto)
+        - 93% das features sao de historico (funciona!)
+        """
+        display.info("="*80)
+        display.info("BOT INICIADO - LOOP SIMPLIFICADO (30s)")
+        display.info("="*80)
+        display.info(f"Symbol: {self.symbol}")
+        display.info(f"Timeframe: {self.timeframe}m")
+        display.info(f"Check Interval: 30s")
+        display.info(f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}")
+        display.info(f"Network: {'TESTNET' if self.bybit_testnet else 'MAINNET'}")
+        display.info("")
+
+        # Inicializacao
+        iteration = 0
         last_heartbeat = datetime.now()
-        heartbeat_interval = 300  # 5 minutes
-        loop_counter = 0
+        heartbeat_interval = 300  # 5 minutos
+        check_interval = 30  # Loop a cada 30s
 
-        # Circuit breaker: track consecutive errors
-        consecutive_errors = 0
-        max_consecutive_errors = 5
+        # Verificar features
+        self._check_feature_compatibility()
 
-        # Simple check interval (like btc_real_v5.py)
-        check_interval = 30  # 30 seconds
+        # Recuperar posicoes abertas (se LIVE mode)
+        if not self.dry_run:
+            self.recover_open_positions()
 
         try:
             while True:
+                iteration += 1
+
                 try:
-                    loop_counter += 1
+                    # STEP 1: Baixar dados (SEMPRE)
+                    display.info("="*80)
+                    display.info(f"ITERATION {iteration} - {datetime.now().strftime('%H:%M:%S')}")
+                    display.info("="*80)
 
-                    # Heartbeat check - log every 5 minutes to prove we're alive
-                    now = datetime.now()
-                    if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
-                        from datetime import timezone
-                        now_utc = datetime.now(timezone.utc)
-                        display.info(f"💓 Heartbeat #{loop_counter} | UTC: {now_utc.strftime('%H:%M:%S')} | Status: {'Position open' if self.position else 'No position'}")
-                        last_heartbeat = now
-
-                        # Send heartbeat via Telegram every hour
-                        if loop_counter % 12 == 0:  # ~every hour with 5min heartbeats
-                            self.telegram.send(f"💓 <b>Bot Alive</b>\n\nLoop #{loop_counter}\nStatus: {'Position open' if self.position else 'No position'}")
-
-                    # Check for Telegram commands
-                    self.telegram.check_commands()
-
-                    # ===================================================================
-                    # SIMPLIFIED LOGIC (matching btc_real_v5.py):
-                    # 1. Download data EVERY iteration
-                    # 2. Get closed candle (iloc[-2])
-                    # 3. Check if already analyzed → skip if yes
-                    # 4. Check cooldown → skip if yes
-                    # 5. Make prediction
-                    # 6. Mark as analyzed
-                    # 7. Sleep 30s
-                    # 8. Repeat
-                    # ===================================================================
-
-                    # Step 1: Download data EVERY iteration (simple, reliable)
                     df = self.get_current_data()
-
                     if df is None or df.empty:
-                        display.warning("⚠️ No data received")
+                        display.warning("No data received")
                         time.sleep(check_interval)
                         continue
 
-                    # Step 2: Get CLOSED candle (iloc[-2]) not incomplete candle (iloc[-1])
-                    current = df.iloc[-2]
+                    # STEP 2: Pegar ULTIMO candle (iloc[-1])
+                    current = df.iloc[-1]  # Ultimo candle
                     current_candle_time = current.name
                     price = current['close']
 
-                    # Step 3: Skip if already analyzed this candle
-                    if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
-                        display.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo candle")
-                        time.sleep(check_interval)
-                        continue
+                    display.info(f"Price: {price:.2f}")
+                    display.info(f"Candle: {current_candle_time}")
 
-                    # Step 3.5: First run - just mark current candle, don't predict yet
-                    if self.last_analyzed_candle_time is None:
-                        display.info(f"🚀 Primeira inicialização - marcando candle atual: {current_candle_time}")
-                        display.info(f"⏳ Aguardando próximo candle fechar (~15min) para fazer primeira predição...")
-                        self.last_analyzed_candle_time = current_candle_time
-                        time.sleep(check_interval)
-                        continue
-
-                    # Step 3.6: NEW CANDLE detected! Wait for API consolidation
-                    # When candle closes (e.g., 10:15), API needs ~5-15s to consolidate data
-                    # This ensures we get EXACT same data as backtest (complete candle)
-                    display.info(f"🆕 Novo candle detectado: {current_candle_time}")
-                    display.info(f"⏳ Aguardando 60s para API consolidar dados...")
-                    time.sleep(60)
-
-                    # Re-download data to get fully consolidated candle
-                    display.info(f"📥 Re-baixando dados para garantir candle consolidado...")
-                    df = self.get_current_data()
-
-                    if df is None or df.empty:
-                        display.warning("⚠️ No data received on re-fetch")
-                        time.sleep(check_interval)
-                        continue
-
-                    # Get the SAME candle again (now fully consolidated)
-                    current = df.iloc[-2]
-                    new_candle_time = current.name
-
-                    # Verify we got the same candle (sanity check)
-                    if new_candle_time != current_candle_time:
-                        display.warning(f"⚠️ Candle mudou após re-fetch: {current_candle_time} → {new_candle_time}")
-                        # Use the new one
-                        current_candle_time = new_candle_time
-
-                    price = current['close']
-
-                    # Show current price
-                    display.info(f"📊 Price: ${price:,.2f} | Candle: {current_candle_time}")
-
-                    # Check if we have an open position
+                    # STEP 3: Se tem posicao, monitora e checa saida
                     if self.position:
-                        # Check exit conditions
-                        self.check_position_exit(current)
+                        self.show_position_status(price)
 
-                        # If still have position, wait before next check
-                        if self.position:
-                            entry = self.position['entry_price']
-                            direction = self.position['direction']
-
-                            if direction == 'long':
-                                pnl_pct = ((price - entry) / entry) * 100
-                            else:
-                                pnl_pct = ((entry - price) / entry) * 100
-
-                            display.info(f"🟢 {direction.upper()} @ ${entry:,.2f} | PnL: {pnl_pct:+.2f}%")
-
-                    # Check if we can open a new position
-                    else:
-                        # Check if bot is paused
-                        if self.paused:
-                            display.info("⏸️ Bot pausado - aguardando /resume")
-                            time.sleep(60)
+                        # Checar saida
+                        if self.check_position_exit(current):
+                            display.info("Position closed")
+                            time.sleep(check_interval)
                             continue
 
-                        # Step 4: Check cooldown
+                    # STEP 4: Se NAO tem posicao, checa entrada
+                    if not self.position:
+                        # Checar cooldown
                         if self.last_trade_time:
-                            time_since_last_trade = (datetime.now() - self.last_trade_time).total_seconds()
-                            if time_since_last_trade < self.trade_cooldown:
-                                remaining_min = int((self.trade_cooldown - time_since_last_trade) / 60)
-                                display.info(f"⏳ Cooldown: {remaining_min}min restantes")
-                                # Mark this candle as analyzed even during cooldown
-                                self.last_analyzed_candle_time = current_candle_time
+                            elapsed = (datetime.now() - self.last_trade_time).total_seconds()
+                            if elapsed < self.trade_cooldown:
+                                remaining = int((self.trade_cooldown - elapsed) / 60)
+                                display.info(f"Cooldown: {remaining}min restantes")
                                 time.sleep(check_interval)
                                 continue
 
-                        # Step 5: Make prediction
-                        try:
-                            display.info("")
-                            display.info("=" * 80)
-                            display.info(f"🔮 Fazendo predição para candle {current_candle_time}...")
-                            display.info(f"💰 Preço Close: ${current['close']:,.2f}")
-                            display.info(f"📊 ATR: ${current.get('atr', 0):,.2f}")
-                            display.info("=" * 80)
+                        # Checar se bot esta pausado
+                        if hasattr(self, 'paused') and self.paused:
+                            display.info("Bot pausado - aguardando /resume")
+                            time.sleep(check_interval)
+                            continue
 
-                            # Get prediction for ONLY the last closed candle (iloc[-2])
-                            df_single = df.iloc[[-2]].copy()
+                        # Fazer predicao no ULTIMO candle (iloc[-1])
+                        display.info("")
+                        display.info("Fazendo predicao...")
 
-                            predictions = make_prediction(
-                                self.model,
-                                self.model_data,
-                                df_single,
-                                self.feature_names
+                        df_single = df.iloc[-1].copy()  # Ultimo candle
+                        predictions = make_prediction(
+                            self.model, 
+                            self.model_data, 
+                            df_single, 
+                            self.feature_names
+                        )
+
+                        if predictions is None or len(predictions) == 0:
+                            display.warning("No predictions")
+                            time.sleep(check_interval)
+                            continue
+
+                        pred = predictions[0]
+
+                        # Converter predicao
+                        if isinstance(pred, (int, float)):
+                            ml_prob_up = float(pred)
+                        else:
+                            ml_prob_up = float(pred[0]) if len(pred) > 0 else 0.5
+
+                        # Calcular confianca
+                        ml_confidence = abs(ml_prob_up - 0.5) * 2.0
+
+                        # Determinar sinal
+                        if ml_prob_up > 0.5:
+                            signal = 1
+                            sig_name = "LONG"
+                        elif ml_prob_up < 0.5:
+                            signal = -1
+                            sig_name = "SHORT"
+                        else:
+                            signal = 0
+                            sig_name = "NEUTRO"
+
+                        # Sistema de 3 niveis
+                        passes = False
+                        if ml_confidence >= self.min_confidence_ultra:
+                            conf_level = "ULTRA"
+                            risk_to_use = self.risk_ultra
+                            sl_to_use = self.sl_ultra
+                            tp_to_use = self.tp_ultra
+                            passes = True
+                        elif ml_confidence >= self.min_confidence_high:
+                            conf_level = "HIGH"
+                            risk_to_use = self.risk_high
+                            sl_to_use = self.sl_high
+                            tp_to_use = self.tp_high
+                            passes = True
+                        elif ml_confidence >= self.min_confidence_low:
+                            conf_level = "LOW"
+                            risk_to_use = self.risk_low
+                            sl_to_use = self.sl_low
+                            tp_to_use = self.tp_low
+                            passes = True
+                        else:
+                            conf_level = "FILTERED"
+                            passes = False
+
+                        status = "PASS" if (signal != 0 and passes) else "FILTERED"
+
+                        display.info(f"Signal: {sig_name}")
+                        display.info(f"Confidence: {ml_confidence:.1%}")
+                        display.info(f"Level: {conf_level}")
+                        display.info(f"Status: {status}")
+
+                        # Abrir posicao se sinal valido
+                        if signal != 0 and passes:
+                            display.info("="*80)
+                            display.info(f"OPENING {sig_name} POSITION - {conf_level}")
+                            display.info("="*80)
+
+                            self.open_position(
+                                current, 
+                                signal, 
+                                ml_confidence,
+                                risk_used=risk_to_use,
+                                conf_level=conf_level,
+                                sl_mult=sl_to_use,
+                                tp_mult=tp_to_use
                             )
 
-                            # Get prediction
-                            pred = predictions[0]  # Only one prediction
+                    # STEP 5: Heartbeat (log a cada 5min)
+                    now = datetime.now()
+                    if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
+                        display.info(f"Heartbeat #{iteration} - Status: {'Position open' if self.position else 'No position'}")
+                        last_heartbeat = now
 
-                            # Calculate confidence (same as btc_real_v5.py and 2.py)
-                            ml_confidence = abs(pred - self.optimal_threshold) * 2
+                    # STEP 6: Checar comandos Telegram
+                    if self.telegram:
+                        self.telegram.check_commands()
 
-                            # 🎯 Sistema de TRÊS Confianças - verifica ULTRA primeiro, depois HIGH, depois LOW
-                            signal = 0  # Start as NEUTRO
-                            risk_to_use = None
-                            sl_to_use = None
-                            tp_to_use = None
-                            conf_level = "NONE"
-
-                            # Verificar se passa LONG ou SHORT
-                            if pred > self.optimal_threshold:
-                                # LONG signal - check ULTRA > HIGH > LOW
-                                if ml_confidence >= self.min_confidence_ultra:
-                                    signal = 1
-                                    risk_to_use = self.risk_ultra
-                                    sl_to_use = self.sl_ultra
-                                    tp_to_use = self.tp_ultra
-                                    conf_level = "ULTRA"
-                                elif ml_confidence >= self.min_confidence_high:
-                                    signal = 1
-                                    risk_to_use = self.risk_high
-                                    sl_to_use = self.sl_high
-                                    tp_to_use = self.tp_high
-                                    conf_level = "HIGH"
-                                elif ml_confidence >= self.min_confidence_low:
-                                    signal = 1
-                                    risk_to_use = self.risk_low
-                                    sl_to_use = self.sl_low
-                                    tp_to_use = self.tp_low
-                                    conf_level = "LOW"
-                            elif pred < self.optimal_threshold:
-                                # SHORT signal - check ULTRA > HIGH > LOW
-                                if ml_confidence >= self.min_confidence_ultra:
-                                    signal = -1
-                                    risk_to_use = self.risk_ultra
-                                    sl_to_use = self.sl_ultra
-                                    tp_to_use = self.tp_ultra
-                                    conf_level = "ULTRA"
-                                elif ml_confidence >= self.min_confidence_high:
-                                    signal = -1
-                                    risk_to_use = self.risk_high
-                                    sl_to_use = self.sl_high
-                                    tp_to_use = self.tp_high
-                                    conf_level = "HIGH"
-                                elif ml_confidence >= self.min_confidence_low:
-                                    signal = -1
-                                    risk_to_use = self.risk_low
-                                    sl_to_use = self.sl_low
-                                    tp_to_use = self.tp_low
-                                    conf_level = "LOW"
-
-                            sig_name = 'LONG' if signal == 1 else 'SHORT' if signal == -1 else 'NEUTRO'
-                            passes = signal != 0
-                            status = f'✅ {conf_level}' if passes else '❌ FILTERED'
-
-                            # SEMPRE mostrar detalhes da predição
-                            display.info("")
-                            display.info("=" * 80)
-                            display.info(f"🔮 PREDIÇÃO GERADA")
-                            display.info("=" * 80)
-                            display.info(f"📊 Probabilidade: {pred:.4f}")
-                            display.info(f"🎯 Threshold: {self.optimal_threshold:.4f}")
-                            display.info(f"📈 Confiança ML: {ml_confidence:.2%}")
-                            display.info(f"🎲 Sinal: {sig_name} | {status}")
-                            display.info("")
-                            display.info(f"⚙️ Limites de Confiança (Sistema de TRÊS Níveis):")
-                            display.info(f"   🔥 ULTRA ({self.min_confidence_ultra:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_ultra else '❌ Não atingiu'} [SL={self.sl_ultra}x TP={self.tp_ultra}x R={self.risk_ultra*100:.2f}%]")
-                            display.info(f"   🟢 HIGH  ({self.min_confidence_high:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_high else '❌ Não atingiu'} [SL={self.sl_high}x TP={self.tp_high}x R={self.risk_high*100:.2f}%]")
-                            display.info(f"   🟡 LOW   ({self.min_confidence_low:.2%}): {'✅ ATINGIU' if ml_confidence >= self.min_confidence_low else '❌ Não atingiu'} [SL={self.sl_low}x TP={self.tp_low}x R={self.risk_low*100:.2f}%]")
-                            if passes:
-                                risk_display = (risk_to_use * 100) if risk_to_use else 0
-                                display.info(f"   💰 Usando nível: {conf_level} | Risco: {risk_display:.2f}% | SL: {sl_to_use}x | TP: {tp_to_use}x")
-                            display.info("=" * 80)
-                            display.info("")
-
-                            # Step 6: Mark this candle as analyzed (regardless of whether we trade)
-                            self.last_analyzed_candle_time = current_candle_time
-
-                            # Check if we have a valid signal (not NEUTRO)
-                            if signal != 0 and passes:
-                                display.info("="*80)
-                                display.info(f"🚨 OPENING {sig_name} POSITION (Nível: {conf_level})")
-                                display.info("="*80)
-                                self.open_position(current, signal, ml_confidence, risk_used=risk_to_use, conf_level=conf_level, sl_mult=sl_to_use, tp_mult=tp_to_use)
-                            else:
-                                # Explicar POR QUE foi neutro/filtered
-                                if not passes:
-                                    display.info(f"⏭️ FILTERED: Confiança {ml_confidence:.2%} não atingiu nem LOW ({self.min_confidence_low:.2%})")
-                                else:
-                                    display.info(f"⏭️ NEUTRO: Probabilidade {pred:.4f} próxima do threshold {self.optimal_threshold:.4f}")
-
-                        except Exception as e:
-                            display.error(f"❌ Prediction error: {e}")
-                            import traceback
-                            traceback.print_exc()
-
-                    # Step 7: Sleep check_interval (30s) before next iteration
+                    # STEP 7: Aguardar proximo loop
                     time.sleep(check_interval)
 
-                    # Reset consecutive errors on successful iteration
-                    if consecutive_errors > 0:
-                        display.info(f"✅ Recovered from errors (was {consecutive_errors} consecutive)")
-                        consecutive_errors = 0
-
-                except KeyboardInterrupt:
-                    raise
                 except Exception as e:
-                    consecutive_errors += 1
-                    last_error_time = datetime.now()
-
-                    display.error(f"❌ Error in main loop (#{consecutive_errors}): {e}")
+                    display.error(f"Loop error: {e}")
                     import traceback
                     traceback.print_exc()
-
-                    # Circuit breaker: if too many consecutive errors, increase wait time and alert
-                    if consecutive_errors >= max_consecutive_errors:
-                        error_msg = f"🚨 CIRCUIT BREAKER: {consecutive_errors} consecutive errors! Última: {e}"
-                        display.error(error_msg)
-                        self.telegram.send(f"🚨 <b>ALERTA: Bot com problemas</b>\n\n{consecutive_errors} erros consecutivos\n\nÚltimo erro:\n{str(e)[:200]}")
-
-                        # Long wait (5 minutes) to avoid hammering if there's a persistent issue
-                        wait_seconds = 300
-                        display.error(f"⏳ Waiting {wait_seconds}s before retry...")
-                        time.sleep(wait_seconds)
-                    else:
-                        # Exponential backoff: 30s, 60s, 90s, 120s, 150s
-                        wait_seconds = min(30 * consecutive_errors, 150)
-                        display.warning(f"⏳ Waiting {wait_seconds}s before retry...")
-                        time.sleep(wait_seconds)
+                    time.sleep(check_interval)
 
         except KeyboardInterrupt:
             display.info("")
-            display.info("🛑 Parando bot...")
+            display.info("="*80)
+            display.info("BOT STOPPED BY USER")
+            display.info("="*80)
 
-            # Don't close position - let it continue on Bybit
             if self.position:
-                display.info("⚠️ Posição deixada aberta na Bybit (será recuperada no restart)")
-                display.info(f"   {self.position['direction'].upper()} @ ${self.position['entry_price']:,.2f}")
+                display.warning("Position still open - close manually!")
 
-            self.telegram.send("🛑 <b>Bot Parado</b>\n\n⚠️ Posição deixada aberta (se houver)")
-            display.info("✅ Bot parado com sucesso")
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 def main():
-    bot = LiveTradingBot()
-    bot.run()
-
+    try:
+        bot = LiveTradingBot()
+        bot.run()
+    except KeyboardInterrupt:
+        display.info("Bot stopped by user")
+    except Exception as e:
+        display.error(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main()
