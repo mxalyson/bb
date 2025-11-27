@@ -1597,10 +1597,8 @@ class LiveTradingBot:
                     # Windows doesn't support SIGALRM, skip timeout
                     yield
 
-            # Protect data download with 120s timeout
-            display.info(f"📥 Baixando dados com timeout de 120s...")
+            # Quick data download (OPTIMIZED - no logs)
             with timeout_context(120):
-                # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
                 df = self.data_manager.get_data(
                     self.symbol,
                     f'{self.timeframe}m',
@@ -1611,25 +1609,17 @@ class LiveTradingBot:
             if df.empty:
                 raise ValueError("No data received")
 
-            display.info(f"📥 Downloaded {len(df)} candles")
-
-            # Build features using FeatureStore
-            display.info(f"⚙️ Construindo features...")
+            # Build features (FAST - no logs)
             df_features = self.feature_store.build_features(df, normalize=False)
 
-            # Add advanced features based on detected model version (same as 2.py)
+            # Add advanced features based on model version
             if self.model_version == "V1":
-                display.info(f"   Applying V1 advanced features...")
                 df_features = create_advanced_features(df_features)
             elif self.model_version == "V2":
-                display.info(f"   Applying V2 advanced features...")
                 df_features = create_advanced_features_v2(df_features)
             elif self.model_version == "Classical":
-                display.info(f"   Applying Classical TA features...")
-                # Classical doesn't need extra features, FeatureStore is enough
-                pass
+                pass  # Classical doesn't need extra features
             else:
-                display.warning(f"   ⚠️ Unknown model type - using V1 features as fallback")
                 df_features = create_advanced_features(df_features)
 
             return df_features
