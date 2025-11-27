@@ -29,7 +29,8 @@ except:
     HAS_MODULES = False
 
 # Config
-SYMBOL = 'ETHUSDT'  # Símbolo a ser testado (ex: 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
+SYMBOL = 'BTCUSDT'  # ✅ FIX: Match model symbol (was ETHUSDT with BTCUSDT model)
+# ⚠️ To use ETHUSDT, train a specific model: scalping_model_ETHUSDT_15m.pkl
 LOOKBACK_DAYS = 15  # Quantidade de dias históricos (ex: 30, 60, 90, 180, 365)
 MODEL_PATH = 'storage/models/scalping_model_BTCUSDT_15m.pkl'  # Caminho do modelo .pkl
 
@@ -420,6 +421,7 @@ class BacktestEngine:
                 'win_rate': 0,
                 'win_rate_adjusted': 0,
                 'roi': 0,
+                'initial_capital': self.initial_capital,  # ✅ FIX: Added missing key
                 'final_capital': self.capital,
                 'total_fees': 0,
                 'total_slip': 0,
