@@ -2324,11 +2324,8 @@ class LiveTradingBot:
                             display.info("Bot pausado - aguardando /resume")
                             continue
 
-                        # Fazer predicao no ULTIMO candle (iloc[-1])
-                        display.info("")
-                        display.info("Fazendo predicao...")
-
-                        df_single = df.iloc[[-1]].copy()  # Ultimo candle como DataFrame (duplo colchete!)
+                        # Fazer predicao no ULTIMO candle (iloc[-1:]) - FAST
+                        df_single = df.iloc[-1:].copy()  # Ultimo candle como DataFrame
                         predictions = make_prediction(
                             self.model, 
                             self.model_data, 
