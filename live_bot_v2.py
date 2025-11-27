@@ -284,9 +284,10 @@ class EnhancedLogger:
         print(f"{Colors.BRIGHT_RED}{'!' * 80}{Colors.RESET}\n")
 
     def info(self, message: str, emoji: str = "ℹ️"):
+        """Info message in GREEN"""
         """Info message"""
         timestamp = self._format_time()
-        print(f"{Colors.DIM}[{timestamp}]{Colors.RESET} {emoji} {message}")
+        print(f"{Colors.DIM}[{timestamp}]{Colors.RESET} {Colors.GREEN}{emoji} {message}{Colors.RESET}")
 
     def success(self, message: str):
         """Success message"""
@@ -1225,6 +1226,11 @@ def create_features_for_bot(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_prediction(model, model_data, df, feature_names):
+    """Make prediction using ensemble model."""
+
+    # CRITICAL: Ensure df is DataFrame, not Series
+    if isinstance(df, pd.Series):
+        df = df.to_frame().T  # Convert Series to DataFrame
     """Make prediction using ensemble model."""
 
     # 🔥 CRITICAL: Check for missing features
@@ -2322,7 +2328,7 @@ class LiveTradingBot:
                         display.info("")
                         display.info("Fazendo predicao...")
 
-                        df_single = df.iloc[-1].copy()  # Ultimo candle
+                        df_single = df.iloc[[-1]].copy()  # Ultimo candle como DataFrame (duplo colchete!)
                         predictions = make_prediction(
                             self.model, 
                             self.model_data, 
