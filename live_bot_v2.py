@@ -1487,9 +1487,11 @@ class LiveTradingBot:
         self.telegram.send(
             f"🤖 <b>Bot Started</b>\n\n"
             f"Symbol: {self.symbol}\n"
-            f"Timeframe: {self.timeframe}m\n"
-            f"Min Confidence: {self.min_confidence*100:.0f}%\n"
-            f"Risk: {self.risk_per_trade*100:.2f}%\n"
+            f"Timeframe: {self.timeframe}m\n\n"
+            f"<b>Sistema de 3 Níveis:</b>\n"
+            f"🔥 ULTRA ({self.min_confidence_ultra*100:.0f}%): SL {self.sl_ultra}x | TP {self.tp_ultra}x | R {self.risk_ultra*100:.2f}%\n"
+            f"🟢 HIGH ({self.min_confidence_high*100:.0f}%): SL {self.sl_high}x | TP {self.tp_high}x | R {self.risk_high*100:.2f}%\n"
+            f"🟡 LOW ({self.min_confidence_low*100:.0f}%): SL {self.sl_low}x | TP {self.tp_low}x | R {self.risk_low*100:.2f}%\n\n"
             f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}\n"
             f"Network: {network}"
         )
@@ -1944,12 +1946,14 @@ class LiveTradingBot:
         # Telegram notification
         mode_str = "📝 PAPER" if is_paper else "💰 REAL"
         self.telegram.send(
-            f"{direction_emoji} <b>ENTRADA {direction.upper()}</b> {mode_str}\n\n"
+            f"{direction_emoji} <b>ENTRADA {direction.upper()}</b> {mode_str} {conf_emoji} <b>{conf_level}</b>\n\n"
             f"Preço: ${actual_entry_price:,.2f}\n"
             f"Qtd: {qty_btc} BTC (${size_usd:,.2f})\n"
-            f"Confiança: {confidence:.1%}\n\n"
-            f"🛑 SL: ${sl:,.2f}\n"
-            f"🎯 TP: ${tp:,.2f}\n\n"
+            f"Confiança: {confidence:.1%} ({conf_level})\n"
+            f"Risco: {risk_pct:.2f}% do capital\n\n"
+            f"🛑 SL: ${sl:,.2f} [ATR×{sl_multiplier}]\n"
+            f"🎯 TP: ${tp:,.2f} [ATR×{tp_multiplier}]\n"
+            f"ATR: ${atr:,.2f}\n\n"
             f"Order ID: {order_id if order_id else 'N/A'}"
         )
 
@@ -2280,7 +2284,6 @@ class LiveTradingBot:
                     df = self.get_current_data()
                     if df is None or df.empty:
                         display.warning("No data received")
-                        time.sleep(check_interval)
                         continue
 
                     # STEP 2: Pegar ULTIMO candle (iloc[-1])
@@ -2298,7 +2301,6 @@ class LiveTradingBot:
                         # Checar saida
                         if self.check_position_exit(current):
                             display.info("Position closed")
-                            time.sleep(check_interval)
                             continue
 
                     # STEP 4: Se NAO tem posicao, checa entrada
@@ -2309,13 +2311,11 @@ class LiveTradingBot:
                             if elapsed < self.trade_cooldown:
                                 remaining = int((self.trade_cooldown - elapsed) / 60)
                                 display.info(f"Cooldown: {remaining}min restantes")
-                                time.sleep(check_interval)
                                 continue
 
                         # Checar se bot esta pausado
                         if hasattr(self, 'paused') and self.paused:
                             display.info("Bot pausado - aguardando /resume")
-                            time.sleep(check_interval)
                             continue
 
                         # Fazer predicao no ULTIMO candle (iloc[-1])
@@ -2332,7 +2332,6 @@ class LiveTradingBot:
 
                         if predictions is None or len(predictions) == 0:
                             display.warning("No predictions")
-                            time.sleep(check_interval)
                             continue
 
                         pred = predictions[0]
@@ -2414,14 +2413,13 @@ class LiveTradingBot:
                     if self.telegram:
                         self.telegram.check_commands()
 
-                    # STEP 7: Aguardar proximo loop
-                    time.sleep(check_interval)
+                    # STEP 7: Loop continuo (SEM SLEEP - modo no_sleep)
+                    # Nao aguarda - roda o mais rapido possivel
 
                 except Exception as e:
                     display.error(f"Loop error: {e}")
                     import traceback
                     traceback.print_exc()
-                    time.sleep(check_interval)
 
         except KeyboardInterrupt:
             display.info("")
