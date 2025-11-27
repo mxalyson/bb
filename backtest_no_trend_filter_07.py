@@ -108,11 +108,17 @@ class BacktestEngine:
             ml_prob_down = 1.0 - ml_prob_up
             ml_confidence = abs(ml_prob_up - 0.5) * 2.0
 
+            # ✅ DEBUG: Count filtered signals
+            if not hasattr(self, 'filter_stats'):
+                self.filter_stats = {'confidence': 0, 'volatility': 0, 'trend': 0, 'valid': 0}
+
             if ml_confidence < self.min_confidence:
+                self.filter_stats['confidence'] += 1
                 return 0, ml_confidence
 
             vol_regime = row.get('volatility_regime', 1.0)
             if vol_regime > 2.5 or vol_regime < 0.4:
+                self.filter_stats['volatility'] += 1
                 return 0, ml_confidence
 
             # FILTRO DE TENDÊNCIA
@@ -123,20 +129,26 @@ class BacktestEngine:
                 if ml_prob_up > 0.5:
                     # LONG: EMA50 deve estar acima EMA200
                     if ema50 > ema200:
+                        self.filter_stats['valid'] += 1
                         return 1, ml_confidence
                     else:
+                        self.filter_stats['trend'] += 1
                         return 0, ml_confidence
                 elif ml_prob_down > 0.5:
                     # SHORT: EMA50 deve estar abaixo EMA200
                     if ema50 < ema200:
+                        self.filter_stats['valid'] += 1
                         return -1, ml_confidence
                     else:
+                        self.filter_stats['trend'] += 1
                         return 0, ml_confidence
             else:
                 # Sem filtro de tendência
                 if ml_prob_up > 0.5:
+                    self.filter_stats['valid'] += 1
                     return 1, ml_confidence
                 elif ml_prob_down > 0.5:
+                    self.filter_stats['valid'] += 1
                     return -1, ml_confidence
 
             return 0, ml_confidence
@@ -409,6 +421,18 @@ class BacktestEngine:
             self.close_position(df.iloc[-1]['close'], 'end_of_data', len(df)-1)
 
         print(f"✅ {len(self.trades)} trades")
+
+        # ✅ DEBUG: Show filter statistics
+        if hasattr(self, 'filter_stats'):
+            total_analyzed = len(df) - 200  # Subtrai os primeiros 200 candles
+            total_filtered = sum(self.filter_stats.values())
+            print(f"\n📊 ESTATÍSTICAS DE FILTROS:")
+            print(f"   Candles analisados: {total_analyzed}")
+            print(f"   🚫 Filtrados por confiança: {self.filter_stats['confidence']}")
+            print(f"   🚫 Filtrados por volatilidade: {self.filter_stats['volatility']}")
+            print(f"   🚫 Filtrados por tendência: {self.filter_stats['trend']}")
+            print(f"   ✅ Sinais válidos: {self.filter_stats['valid']}")
+            print(f"   📉 Taxa de aprovação: {self.filter_stats['valid']/total_analyzed*100:.1f}%")
 
     def get_stats(self) -> Dict:
         if not self.trades:
