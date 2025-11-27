@@ -153,6 +153,18 @@ class BacktestEngine:
 
             return 0, ml_confidence
         except Exception as e:
+            # ✅ DEBUG: Log prediction errors
+            if not hasattr(self, 'prediction_errors'):
+                self.prediction_errors = []
+                print(f"\n❌ ERRO NO GET_SIGNAL (idx={idx}): {str(e)}")
+                print(f"   Tipo: {type(e).__name__}")
+
+                # Verificar features
+                missing_features = [f for f in self.feature_names if f not in df.columns]
+                if missing_features:
+                    print(f"   ⚠️ Features ausentes: {missing_features[:10]}")
+
+            self.prediction_errors.append(str(e))
             return 0, 0.0
 
     def open_position(self, signal: int, row: pd.Series, ml_confidence: float, idx: int):
@@ -440,6 +452,15 @@ class BacktestEngine:
                 print(f"      Possível causa: Cooldown entre trades ou outra lógica bloqueando")
         else:
             print(f"   ⚠️ filter_stats não foi criado - possível erro no get_signal()")
+
+        # ✅ DEBUG: Show prediction errors summary
+        if hasattr(self, 'prediction_errors'):
+            print(f"\n❌ ERROS DE PREDIÇÃO:")
+            print(f"   Total de erros: {len(self.prediction_errors)}")
+            if self.prediction_errors:
+                unique_errors = set(self.prediction_errors[:5])  # Primeiros 5 erros únicos
+                for err in list(unique_errors)[:3]:
+                    print(f"   - {err[:80]}")  # Primeiros 80 caracteres
 
     def get_stats(self) -> Dict:
         if not self.trades:
