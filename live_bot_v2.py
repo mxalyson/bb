@@ -2366,7 +2366,7 @@ class LiveTradingBot:
                         # ⚡ CRÍTICO: Só analisa se for um NOVO candle (evita duplicação)
                         if self.last_analyzed_candle_time and current_candle_time == self.last_analyzed_candle_time:
                             display.info(f"⏭️ Mesmo candle ({current_candle_time}) - aguardando novo")
-                            time.sleep(10)
+                            # ✅ Sem sleep - loop continua normalmente
                             continue
 
                         # Checar cooldown
@@ -2375,13 +2375,13 @@ class LiveTradingBot:
                             if elapsed < self.trade_cooldown:
                                 remaining = int((self.trade_cooldown - elapsed) / 60)
                                 display.info(f"⏳ Cooldown: {remaining}min restantes")
-                                time.sleep(30)
+                                # ✅ Sem sleep - loop continua normalmente
                                 continue
 
                         # Checar se bot esta pausado
                         if hasattr(self, 'paused') and self.paused:
                             display.info("⏸️ Bot pausado - aguardando /resume")
-                            time.sleep(30)
+                            # ✅ Sem sleep - loop continua normalmente
                             continue
 
                         # Fazer predicao no ÚLTIMO candle FECHADO (iloc[-2]) ✅
@@ -2492,11 +2492,9 @@ class LiveTradingBot:
                     if self.telegram:
                         self.telegram.check_commands()
 
-                    # STEP 7: Sleep inteligente (otimizado)
-                    # Se tem posição: check rápido (5s) para monitorar SL/TP
-                    # Se não tem: check lento (30s) para economizar recursos
-                    sleep_time = 5 if self.position else 30
-                    time.sleep(sleep_time)
+                    # STEP 7: Sleep mínimo (evita loop muito rápido)
+                    # ✅ Apenas 5s independente de ter posição ou não
+                    time.sleep(5)
 
                 except Exception as e:
                     display.error(f"❌ Loop error: {e}")
