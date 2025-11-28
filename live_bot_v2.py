@@ -1452,6 +1452,8 @@ class LiveTradingBot:
         self.capital = self.initial_capital
         self.last_price: Optional[float] = None
         self.last_analyzed_candle_time: Optional[datetime] = None  # Track last candle to avoid re-analysis
+        self.is_first_run = True  # Flag para pular primeira análise (candle pode estar incompleto)
+        self.warmup_complete = False  # Flag de warmup completo
 
         # State persistence file (unique per symbol)
         symbol_clean = self.symbol.replace('USDT', '').lower()
@@ -2347,6 +2349,13 @@ class LiveTradingBot:
 
                         # Fazer predicao no ÚLTIMO candle FECHADO (iloc[-2]) ✅
                         display.info("")
+                        # Marcar warmup como completo na primeira predição real
+                        if not self.warmup_complete:
+                            display.info("="*80)
+                            display.info("✅ WARMUP COMPLETO - Bot agora está OPERACIONAL!")
+                            display.info("="*80)
+                            self.warmup_complete = True
+
                         display.info("🔮 Fazendo predição...")
 
                         df_single = df.iloc[[-2]].copy()  # ✅ Último candle FECHADO
