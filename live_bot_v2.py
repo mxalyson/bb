@@ -1724,17 +1724,21 @@ class LiveTradingBot:
         # Check stop loss and take profit
         if direction == 'long':
             if low <= self.position['stop_loss']:
-                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                # ✅ FIX: Usar preço REAL (low) ao invés do nível de SL
+                self.close_position(current_candle, 'stop_loss', close=low)
                 return True
             if high >= self.position['take_profit']:
-                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                # ✅ FIX: Usar preço REAL (high) ao invés do nível de TP
+                self.close_position(current_candle, 'take_profit', close=high)
                 return True
         else:  # short
             if high >= self.position['stop_loss']:
-                self.close_position(current_candle, 'stop_loss', close=self.position['stop_loss'])
+                # ✅ FIX: Usar preço REAL (high) ao invés do nível de SL
+                self.close_position(current_candle, 'stop_loss', close=high)
                 return True
             if low <= self.position['take_profit']:
-                self.close_position(current_candle, 'take_profit', close=self.position['take_profit'])
+                # ✅ FIX: Usar preço REAL (low) ao invés do nível de TP
+                self.close_position(current_candle, 'take_profit', close=low)
                 return True
 
         return False
