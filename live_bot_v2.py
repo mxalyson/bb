@@ -1402,6 +1402,13 @@ class LiveTradingBot:
         # Cooldown between trades (seconds)
         self.trade_cooldown = int(os.getenv('TRADE_COOLDOWN_SEC', '900'))  # 15 minutes default
 
+        # Data fetch timeout (seconds)
+        self.data_timeout = int(os.getenv('DATA_TIMEOUT_SEC', '30'))  # ✅ NOVO: 30s default (mais rápido)
+
+        # Position status display interval (seconds) - evita logs repetidos
+        self.position_status_interval = int(os.getenv('POSITION_STATUS_INTERVAL_SEC', '300'))  # ✅ NOVO: 5min default
+        self.last_position_status_time: Optional[datetime] = None
+
         # Dry run mode
         self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
 
@@ -1599,9 +1606,9 @@ class LiveTradingBot:
                     # Windows doesn't support SIGALRM, skip timeout
                     yield
 
-            # Protect data download with 120s timeout
-            display.info(f"📥 Baixando dados com timeout de 120s...")
-            with timeout_context(120):
+            # Protect data download with configurable timeout
+            display.info(f"📥 Baixando dados com timeout de {self.data_timeout}s...")
+            with timeout_context(self.data_timeout):
                 # DataManager.get_data expects positional args: (symbol, timeframe, lookback_days, use_cache)
                 df = self.data_manager.get_data(
                     self.symbol,
@@ -2069,11 +2076,15 @@ class LiveTradingBot:
         # Duration
         duration = current_candle.name - self.position['entry_time']
 
-        # Log
+        # Log - com informações detalhadas de SL/TP
         is_win = pnl_amount_after_fees > 0
         result_emoji = "✅" if is_win else "❌"
         reason_emoji = "🎯" if reason == 'take_profit' else "🛑"
         reason_text = "GAIN/TAKE PROFIT" if reason == 'take_profit' else "STOP LOSS"
+
+        # Mostrar níveis de SL/TP para clareza
+        sl_level = self.position['stop_loss']
+        tp_level = self.position['take_profit']
 
         display.info("")
         display.info("=" * 80)
@@ -2081,6 +2092,7 @@ class LiveTradingBot:
         display.info("=" * 80)
         display.info(f"Entrada: ${entry_price:,.2f} @ {self.position['entry_time']}")
         display.info(f"Saída:   ${exit_price:,.2f} @ {current_candle.name}")
+        display.info(f"🛑 Stop Loss: ${sl_level:,.2f} | 🎯 Take Profit: ${tp_level:,.2f}")  # ✅ NOVO: Mostra níveis
         display.info(f"Duração: {duration}")
         display.info(f"PnL Líquido: {pnl_pct_after_fees:+.2f}% (${pnl_amount_after_fees:+,.2f})")
         display.info(f"Taxas: ${fee:.2f}")
@@ -2317,11 +2329,21 @@ class LiveTradingBot:
 
                     # STEP 3: Se tem posicao, monitora e checa saida
                     if self.position:
-                        self.show_position_status(price)
+                        # ✅ Mostrar status apenas a cada X minutos (evita logs repetidos)
+                        now = datetime.now()
+                        should_show_status = (
+                            self.last_position_status_time is None or
+                            (now - self.last_position_status_time).total_seconds() >= self.position_status_interval
+                        )
+
+                        if should_show_status:
+                            self.show_position_status(price)
+                            self.last_position_status_time = now
 
                         # Checar saida
                         if self.check_position_exit(current):
                             display.info("Position closed")
+                            self.last_position_status_time = None  # Reset timer após fechar
                             continue
 
                     # STEP 4: Se NAO tem posicao, checa entrada
