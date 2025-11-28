@@ -2324,12 +2324,23 @@ class LiveTradingBot:
                     # STEP 2: Pegar ÚLTIMO candle FECHADO (iloc[-2]) ✅ IGUAL BACKTEST 2.PY
                     # iloc[-1] = candle atual (ABERTO, instável) ❌
                     # iloc[-2] = último candle FECHADO (estável) ✅
+
+                    # ✅ DEBUG: Mostrar últimos candles para verificar timestamps
+                    if iteration <= 2:  # Só nas primeiras iterações
+                        now_utc = datetime.utcnow()
+                        last_3_candles = df.tail(3).index.tolist()
+                        display.info(f"⏰ Hora UTC: {now_utc.strftime('%H:%M:%S')}")
+                        display.info(f"📊 Últimos candles:")
+                        for idx, c in enumerate(last_3_candles):
+                            label = "[-3]" if idx == 0 else "[-2] ✅ USAR" if idx == 1 else "[-1] aberto"
+                            display.info(f"   {label}: {c.strftime('%Y-%m-%d %H:%M:%S')}")
+
                     current = df.iloc[-2]
                     current_candle_time = current.name
                     price = current['close']
 
-                    display.info(f"Price: {price:.2f}")
-                    display.info(f"Candle Fechado: {current_candle_time}")
+                    display.info(f"💰 Price: {price:.2f}")
+                    display.info(f"🕐 Candle: {current_candle_time.strftime('%Y-%m-%d %H:%M')}")
 
                     # STEP 3: Se tem posicao, monitora e checa saida
                     if self.position:
